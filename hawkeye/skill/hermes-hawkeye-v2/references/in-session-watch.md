@@ -79,3 +79,20 @@ window rather than creating one.
 - **A watcher that outlives its stop is the same bug as no TTL at all**: an orphaned bash child
   polling forever is invisible in the UI. If a stop reports success, confirm the pids are gone in
   the same breath.
+
+## Producer/watcher split (work continues with nobody in the chat)
+
+A run armed in the chat cannot outlive it, and a cron fire cannot wake the chat (its delivery
+targets platforms; WebUI is not one). When the work must continue while the user is away, split it:
+
+- **producer**: a `monitor`-gated cron job. The monitor is a deterministic detector, so an
+  unchanged tick costs nothing and opens no session at all (`_apply_monitor_gate` runs before the
+  agent turn); a changed tick does the real work and appends one entry to a report file.
+- **notifier**: `hk run ... -- hk watch-file --path <report> --interval 10 --ttl 43200` armed in
+  the chat. It does no work and touches no network; it exits when the report's digest changes, and
+  the phase exit wakes this session.
+
+The report file is the contract: inspectable afterwards, survives both processes, and its digest
+cannot fire on a clock tick. Say the shape out loud when arming ("watches this file, wakes on
+change, gives up after 12h with a line"), because an unannounced watcher is the invisible-resource
+problem again.

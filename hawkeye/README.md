@@ -232,6 +232,36 @@ file; the tool never touches the repository and takes the token from the environ
 
 ---
 
+## 8a. Two-process pattern: a producer that works, a watcher that wakes
+
+Some work must continue when nobody is in the chat — an issue triage loop, a nightly audit. A run
+started from the chat cannot do that (it dies with the session), and cron cannot wake a chat session
+(its delivery targets platforms; WebUI is not one, and every fire creates a session of its own).
+Split the two halves:
+
+| Half | Runs where | Job | Visible how |
+|---|---|---|---|
+| producer | cron (`monitor`-gated) | detection + real work + append to a report file | the schedule is listed in the UI; a run appears only when the monitor output changed |
+| notifier | `hk run` in the chat session | `hk watch-file --path <report>` — exit on change | the wake lands in the session that armed it |
+
+```bash
+# producer: cron job whose monitor is a deterministic detector; when it fires it does the
+# work and appends one entry to the report file (the file is the contract between the halves)
+# notifier: armed from the chat, exits the moment the producer writes
+hk run --id inbox-watch -- /path/to/bin/hk watch-file \
+    --path "$HERMES_HOME/inbox/report.md" --interval 10 --ttl 43200 --name inbox
+```
+
+Why the file and not a queue or a socket: the report is inspectable by a human after the fact, it
+survives both processes, and its digest is a wake signal that cannot fire on a clock tick. Wakes
+therefore mean "something was written", never "time passed" — the same property the in-session
+issue watcher gets from exiting only on new issues.
+
+`watch-file` also carries two properties every long-lived notifier needs: it prints a plain
+heartbeat line each poll (so stall detection cannot mistake a quiet watcher for a hung one) and it
+ends its window with a line of output rather than silence, so an expired watch becomes a question
+in the chat instead of a process that quietly stopped.
+
 ## 9. Boundaries and unverified items
 
 | Item | Status |

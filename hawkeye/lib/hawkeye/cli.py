@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -165,6 +166,46 @@ def cmd_doctor(args: argparse.Namespace, cfg: dict) -> int:
     return 1 if any(row["incident"] for row in rows) else 0
 
 
+def cmd_watch_file(args: argparse.Namespace, cfg: dict) -> int:
+    """Block until a file's content changes, then exit — the notification half of a run.
+
+    This is the counterpart to a producer that must keep working when nobody is in the chat
+    (a cron job doing detection and real work). The producer writes a report file; this exits
+    when it changes, the phase reports, and the session that started the run gets woken. It does
+    no work of its own and never touches the network, so a wake always means "something was
+    written", never "the clock ticked".
+
+    Heartbeat lines are plain (no milestone prefix, so they add nothing to the report) but they
+    keep ``work.log`` growing: a deliberately quiet watcher must not look hung to stall detection.
+    """
+    path = Path(args.path).expanduser()
+    interval = float(args.interval if args.interval is not None else 10.0)
+    ttl = float(args.ttl if args.ttl is not None else 43200.0)
+    prefix = str(cfg.get("milestone_prefix", "HK-MS "))
+
+    def digest() -> str | None:
+        try:
+            return hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError:
+            return None
+
+    baseline = digest()
+    if baseline is None:
+        sys.stderr.write("hk watch-file: %s does not exist yet; waiting for it to appear\n" % path)
+    started = time.time()
+    while True:
+        current = digest()
+        if current != baseline:
+            print("%s%s: report changed (%s)" % (prefix, args.name, path))
+            return 0
+        if time.time() - started >= ttl:
+            print("%s%s: no change for %ds; stopping" % (prefix, args.name, int(ttl)))
+            return 0
+        print("[watch] %s unchanged, next check in %ds" % (path.name, int(interval)))
+        sys.stdout.flush()
+        time.sleep(interval)
+
+
 def cmd_gate_check(args: argparse.Namespace, cfg: dict) -> int:
     """Report gate coverage per profile — the gate plugin loads per profile, not per host."""
     rows = gatecheck.report()
@@ -318,6 +359,12 @@ def build_parser() -> argparse.ArgumentParser:
         if name == "status":
             sp.add_argument("--json", action="store_true")
 
+    wf = sub.add_parser("watch-file",
+                        help="block until a file changes, then exit (producer-notifies-consumer)")
+    wf.add_argument("--path", required=True, help="file whose content is the signal")
+    wf.add_argument("--interval", type=float, default=10.0, help="seconds between checks")
+    wf.add_argument("--ttl", type=float, default=43200.0, help="give up after this many seconds")
+    wf.add_argument("--name", default="watch", help="label used in the milestone line")
     doc = sub.add_parser("doctor", help="safety sweep: restart dead supervision phases, raise incidents")
     doc.add_argument("--fix", action="store_true")
     doc.add_argument("--json", action="store_true")
@@ -348,6 +395,6 @@ def main(argv: list[str] | None = None) -> int:
         "run": cmd_run, "kanban": cmd_kanban, "phase": cmd_phase, "job": cmd_job,
         "status": cmd_status, "lease": cmd_lease, "doctor": cmd_doctor,
         "events": cmd_events, "stop": cmd_stop, "gc": cmd_gc,
-        "gate-check": cmd_gate_check,
+        "gate-check": cmd_gate_check, "watch-file": cmd_watch_file,
     }
     return handlers[args.cmd](args, cfg)

@@ -202,6 +202,42 @@ def test_skill_ships_every_file_it_points_at() -> None:
           "skill install incomplete" in installer, "no runtime assertion in install.sh")
 
 
+def test_watch_file_exits_when_the_producer_writes() -> None:
+    """The notification half must be dumb: no network, no work, exit only on a real write.
+
+    This is the piece that lets a producer keep working when nobody is in the chat (cron) while
+    the wake still lands in the session that armed the watcher. It has to be boringly reliable:
+    sleep on a digest, exit on change, and come back with a question instead of silence when the
+    window ends.
+    """
+    conf = cfg("watch")
+    target = BASE / "inbox.md"
+    target.write_text("v1\n")
+    cmd = [sys.executable, str(HK), "watch-file", "--path", str(target),
+           "--interval", "0.2", "--ttl", "10", "--name", "inbox"]
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                            env={**ENV, "HAWKEYE_V2_CONFIG": str(conf)})
+    time.sleep(0.8)
+    check("watch-file: does not exit while the file is unchanged", proc.poll() is None,
+          "exited early with %s" % proc.returncode)
+    target.write_text("v2\n")                       # the producer writes: this is the signal
+    try:
+        out, _ = proc.communicate(timeout=10)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        out = ""
+    check("watch-file: exits when the file changes", proc.returncode == 0, str(proc.returncode))
+    last_line = "".join(out.strip().splitlines()[-1:]) or "no output"
+    check("watch-file: the milestone names the change", "report changed" in out, last_line)
+
+    quiet = subprocess.run([sys.executable, str(HK), "watch-file", "--path", str(target),
+                            "--interval", "0.1", "--ttl", "0.4", "--name", "inbox"],
+                           capture_output=True, text=True, timeout=20,
+                           env={**ENV, "HAWKEYE_V2_CONFIG": str(conf)})
+    check("watch-file: a window that ends comes back with a line, not silence",
+          quiet.returncode == 0 and "no change for" in quiet.stdout, quiet.stdout[-120:])
+
+
 # ── 3. agent stops renewing -> doctor raises an incident ─────────────────
 def test_agent_unreachable() -> None:
     """A report that nobody acknowledges has to end in an incident.
@@ -652,6 +688,7 @@ def main() -> int:
     print("hawkeye-v2 selftest  root=%s" % RUNS)
     for test in (test_retry_then_success, test_stall_is_detected, test_stall_zero_disables_the_check,
                  test_skill_ships_every_file_it_points_at,
+                 test_watch_file_exits_when_the_producer_writes,
                  test_agent_unreachable,
                  test_agent_responsive, test_phase_death_recovery,
                  test_milestone_and_wake_discipline, test_phase_exits_when_the_run_disappears,

@@ -37,6 +37,14 @@ Python >= 3.11), this **skill** (the agent-side procedure), and an optional
   hawkeye. Release mechanics for this repo — pre-flight greps, creating the remote
   without `gh`, verifying a push from the GitHub API, and what the installed-skill
   symlink does *not* cover — are in `references/publishing.md`.
+- **What the docs point at, the installer must ship.** A `references/<name>.md` named in
+  `SKILL.md` is a promise with two halves: the file exists in the tree, **and** `install.sh`
+  copies it. Copying the directory (`cp -a "$REPO_DIR/skill/<name>/." "$SKILL_DEST/"`) is the
+  only version that keeps them together; a single-file `cp` ships a contract whose pointers a
+  fresh host cannot open, while the author's own runs keep working off the local copy. Assert
+  after the install that every reference the skill names exists, and keep a test for the class
+  (grep the names out of `SKILL.md`, compare with the tree, and check the installer copies a
+  directory rather than the entry file).
 
 ## When to use
 
@@ -195,7 +203,17 @@ Inbound reports on the public repo are watched by a **bounded in-session watcher
 prints one milestone line on news **or** on TTL expiry. The wake then lands in the chat that
 armed it, and the window always closes with a question instead of going quiet. cron is only for
 "nobody is here to see it": every fire opens a NEW session window and cannot deliver into an
-existing one. Two rules that cost the loop silently:
+existing one. Three rules that cost the loop silently:
+
+- **A quiet-by-design job has to prove it is alive.** With the default `stall_seconds` (900 s) the
+  phase kills any job whose `work.log` stops growing, and a watcher that only speaks on news is
+  indistinguishable from a hung one: the event log shows `attempt_failed` with `reason: stalled`
+  right after `attempt_start`, `last exit code: 124`, an automatic retry ~30 s later, and the same
+  milestone repeated once per attempt in the delivered report — a healthy job being killed and
+  restarted on a loop. Print one **plain** line per poll (`[watch] poll rc=0 at <ts>`) with no
+  milestone prefix, so the file keeps moving without adding entries to the report, or set
+  `stall_seconds = 0`, which now genuinely disables the check instead of meaning "kill on the
+  first tick".
 
 - **Advance the seen-state strictly after the reply lands** (`--mark-seen` last), and filter
   comments authored by the token's own account (`--ignore-authors`). The watcher posts as the
