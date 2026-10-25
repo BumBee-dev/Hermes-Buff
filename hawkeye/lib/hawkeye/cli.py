@@ -212,6 +212,7 @@ def cmd_stop(args: argparse.Namespace, cfg: dict) -> int:
         except (ProcessLookupError, PermissionError):
             pass
     # Give the group a moment to die, then make sure: a shell waiting on a child can ignore TERM.
+    survivors: list[int] = []
     for target, ticks in targets:
         for _ in range(20):
             if not store.pid_alive(target, ticks):
@@ -222,11 +223,23 @@ def cmd_stop(args: argparse.Namespace, cfg: dict) -> int:
                 os.killpg(os.getpgid(target), signal.SIGKILL)
             except (ProcessLookupError, PermissionError):
                 pass
+        for _ in range(20):
+            if not store.pid_alive(target, ticks):
+                break
+            time.sleep(0.05)
+        else:
+            survivors.append(target)
     store.write_json(rd / store.STATE, {**state, "finished": True,
                                         "finish_reason": "stopped",
                                         "finished_at": time.time()})
-    store.append_event(rd, "run_stopped")
+    store.append_event(rd, "run_stopped", survivors=survivors or None)
     print("stopped %s" % args.run)
+    if survivors:
+        # Never let a stop look successful while something it was meant to kill is still alive:
+        # a watcher that survives its own stop is exactly the invisible-resource problem.
+        sys.stderr.write("hk: warning: still alive after stop: %s\n"
+                         % ", ".join(str(p) for p in survivors))
+        return 1
     return 0
 
 
