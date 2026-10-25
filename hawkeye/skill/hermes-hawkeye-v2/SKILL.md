@@ -166,6 +166,23 @@ noise bothers you.
 `runs/` only grows — run `hk gc --days 7` periodically (`--dry-run` to look first,
 `--force` to include runs that carry an incident).
 
+### Issue maintenance loop (repo hygiene, separate from `hk runs`)
+
+Inbound reports on the public repo are serviced by a Hermes cron job, not by a
+phase: monitor = `issue-watch.py --json` (deterministic and read-only, so an
+unchanged repo produces an identical tick and suppresses the agent run entirely),
+state in the watch state file, output delivered to the chat. Two rules that cost
+the loop silently:
+
+- **Advance the seen-state strictly after the reply lands** (`--mark-seen` last).
+  The watcher posts as the account that owns the GitHub token, so a state advanced
+  before posting leaves your own reply behind as the next tick's "new comment" and
+  the next run answers itself.
+- **A delivered tick whose text is a sentinel rather than watcher JSON means the
+  job's monitor was swapped** (delivery tests do exactly that). Fix the job, not
+  the issue: the Cron section of the `hermes-agent` skill's background-systems
+  reference carries the swap/restore procedure.
+
 ## Pitfalls
 
 - **A card created without `--provider` / `--model` runs on the host default and says
@@ -221,6 +238,13 @@ noise bothers you.
 - But **replacing the files of an already-enabled plugin does not reload it** — the
   gateway keeps running the old module. `disable` then `enable` to hot-load again;
   the copy inside the WebUI process needs a WebUI restart.
+- **"No leftover process" needs a sampling loop, not one `pgrep` snapshot.** A green suite can leave a
+  phase alive for a sub-second window right after the run directory disappears, so a snapshot taken
+  immediately after exit reports a leak and a snapshot a second later reports it fixed — same code,
+  opposite verdicts. Sample every 0.5 s for ~20 s (`for i in $(seq 1 40); do pgrep -af 'bin/hk (phase|run)';
+  sleep 0.5; done`) and report the measured lifetime, then repeat the suite 2–3 times: transient in
+  every run means self-exiting, growing across runs means a real leak. A leftover with a *different*
+  run id each time (not the one the test names) is a second fixture leaking, not the one you fixed.
 - Wake turns advance on their own (measured on the WebUI: no page refresh needed).
 - Use `OnCalendar=*:0/2` rather than `OnBootSec` + `OnUnitActiveSec`: after a manual
   `systemctl --user start` of the service, the latter stops scheduling the next

@@ -244,6 +244,7 @@ file; the tool never touches the repository and takes the token from the environ
 | Unreachable-agent incident (`agent_unreachable`) | **Verified deterministically** as of the current test suite: the test now waits for the report and for the lease to exceed `wake_grace_seconds` instead of relying on doctor startup being slow. The previous version flaked (2 of 3 runs) and the flake landed exactly on this path |
 | `fallback_command` external call | Implemented, empty by default; the reference host only had a WeChat bridge, so it was not configured or exercised |
 | Job output over 256KB per tick | A single tick reads at most 256KB of deltas; the rest is read on the next tick — nothing is lost, but it lags by one tick |
+| A run directory removed underneath a live run | The supervision phase exits within one poll (`HK-ERROR run directory disappeared`) and does not recreate it. It does **not** kill the job child: deleting a run root means "forget this run", not "stop the work", and `hk gc` never deletes a live run — only an outside `rm` can get here. Use `hk stop --run <id>` when the intent is to stop |
 
 ---
 
@@ -257,6 +258,16 @@ python3 tests/gate_selftest.py    # synthetic board database, 29 checks (complet
 Both suites must be green. The unreachable-agent check is timing-sensitive on purpose — it waits for
 the report and for the lease to age past `wake_grace_seconds` rather than assuming process startup
 covers the window, because that assumption used to make it the one flaky test in the suite.
+
+Both board tests stop their run in a `finally` and assert nothing of theirs survives: a watcher that
+has *reported* is not `finished`, so a later doctor sweep in the same suite would adopt it (that is
+where the orphaned `hk phase --run kb-1` processes in #4 came from — and on a failing run the
+harness keeps the temp root, so the adoptee would poll it forever).
+
+Checking for leftovers needs a deliberate pattern: a run started as `hk --root DIR run --id X` has
+neither `phase --run` nor a bare `run` at the position a naive `pgrep -f "bin/hk (phase|run)"`
+expects. Use `ps -eo args | grep -E "[b]in/hk"` and filter by run id; that also catches the
+`hk job --run` children.
 
 Coverage: a failed retry reports only once / stall detection and process-group kill / no lease renewal raises an
 incident / no false alarm after a lease is renewed / **the job keeps running after the phase is SIGKILLed and

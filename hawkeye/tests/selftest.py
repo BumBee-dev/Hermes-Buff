@@ -442,9 +442,26 @@ def test_named_board_is_not_the_default_board() -> None:
         check("alt: an event on the named board triggers a report", False,
               "no report within 25s: the watcher read another board's DB")
         return
-    report = RUNS / rid / "report.md"
-    text = report.read_text() if report.is_file() else ""
-    check("alt: the named board's card is reported", "alt probe" in text, (text or out)[-300:])
+    else:
+        report = RUNS / rid / "report.md"
+        text = report.read_text() if report.is_file() else ""
+        check("alt: the named board's card is reported", "alt probe" in text, (text or out)[-300:])
+    finally:
+        # Same reason as the default-board test: a watcher that has reported is NOT finished, so
+        # a later doctor sweep in this suite adopts it (spawning `hk phase --run altboard-1`).
+        # On a green run BASE is deleted and the phase guard kills the adoptee; on a FAILING run
+        # the harness keeps the root ("failure site kept:"), and the adoptee would poll a live
+        # root with nothing to do, forever. Stopping the run removes the state that makes it
+        # adoptable in the first place (#4, second half — reported by the same reviewer).
+        subprocess.run([sys.executable, str(HK), "stop", "--run", rid], env=env,
+                       capture_output=True, timeout=60)
+        if phase.poll() is None:
+            phase.kill()
+            phase.wait(timeout=5)
+    leftover = subprocess.run(["pgrep", "-f", "hk[ ]phase --run %s" % rid],
+                              capture_output=True, text=True)
+    check("alt: no adopted supervision phase is left behind", leftover.stdout.strip() == "",
+          leftover.stdout)
 
 
 def test_gate_check_reports_ungated_profiles() -> None:
