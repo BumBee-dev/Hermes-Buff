@@ -30,6 +30,10 @@ def _restart(cfg: dict, rd: Path, meta: dict) -> Optional[int]:
     entry = str(meta.get("entry") or "").strip()
     if not entry or not Path(entry).is_file():
         return None
+    # meta.json was read at scan time; if the run was deleted or renamed since (hk gc, a test
+    # removing its root), spawning a phase here would recreate the directory and poll forever.
+    if not (rd / store.META).is_file():
+        return None
     if _restart_count(rd) >= int(cfg.get("max_restarts", 5)):
         return None
     proc = subprocess.Popen([sys.executable, entry, "phase", "--run", rd.name],

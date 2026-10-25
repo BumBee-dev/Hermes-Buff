@@ -65,6 +65,13 @@ class Phase:
                 return 0
             store.append_event(self.rd, "phase_start", pid=os.getpid())
             while True:
+                # A run whose meta.json is gone was deleted underneath us (hk gc, a test that
+                # removed its temp root). store.run_lock() recreates the directory on every
+                # tick, so without this check the phase would poll a phantom run forever —
+                # silent, ~30 MB RSS each, and invisible in any log. Exit instead.
+                if not (self.rd / store.META).is_file():
+                    print("HK-ERROR run directory disappeared (no meta.json): %s" % self.rd)
+                    return 2
                 self._beat()
                 terminal, reason = self._advance()
                 if terminal:

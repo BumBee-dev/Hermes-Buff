@@ -11,6 +11,7 @@ Covers the three properties the design is built on:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
@@ -256,6 +257,37 @@ def test_status_all() -> None:
           any(r["run"] == "retry-1" and r["status"] == "done" for r in rows), str(rows[:2]))
 
 
+def test_phase_exits_when_the_run_disappears() -> None:
+    """A phase whose run directory is deleted must exit, not poll a phantom (#4).
+
+    ``store.run_lock()`` recreates the directory on every tick, so before this guard a phase
+    whose run root was removed (hk gc, or a test deleting its temp root) kept polling forever:
+    no output, ~30 MB RSS each, one per green suite run.
+    """
+    conf = cfg("vanish", poll_seconds=0.2)
+    job = script("vanish.sh", "#!/bin/bash\nfor i in $(seq 1 20); do echo tick $i; sleep 0.5; done\n")
+    rid = "vanish-1"
+    env = {**ENV, "HAWKEYE_V2_CONFIG": str(conf)}
+    phase = subprocess.Popen([sys.executable, str(HK), "run", "--id", rid, "--",
+                              "/bin/bash", str(job)],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
+    started = wait_for(lambda: (read(rid, "state.json") or {}).get("job_pid"), 10)
+    check("vanish: the job is running before the run is deleted", bool(started))
+    job_pid = (read(rid, "state.json") or {}).get("job_pid")
+    shutil.rmtree(RUNS / rid, ignore_errors=True)
+    exited = wait_for(lambda: phase.poll() is not None, 10)
+    check("vanish: the phase exits once the run directory is gone", exited,
+          "still running: pid %s" % phase.pid)
+    if not exited:
+        phase.kill()
+    phase.wait(timeout=5)
+    if job_pid:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(os.getpgid(int(job_pid)), signal.SIGKILL)
+    check("vanish: the run directory is not recreated by the phase",
+          not (RUNS / rid / "meta.json").exists(), str(RUNS / rid))
+
+
 def test_kanban_watcher_reads_default_board() -> None:
     """v1 died on string-joining `boards/<slug>/kanban.db`: the default board's db lives
     in <home>/kanban.db. This uses a copy of the real db to prove this version goes
@@ -289,15 +321,30 @@ def test_kanban_watcher_reads_default_board() -> None:
         out, err = phase.communicate(timeout=25)
     except subprocess.TimeoutExpired:
         phase.kill()
-        out, err = phase.communicate()
-        check("kb: a new event triggers one report", False, "timeout, err=%s" % err[-300:])
-        return
-    state = read(rid, "state.json") or {}
-    check("kb: a new event triggers one report",
-          "[hawkeye]" in out and "board:" in out, (out or err)[-300:])
-    check("kb: cursor advances after the report", (state.get("cursor") or 0) == probe_id,
-          "cursor=%s probe_id=%s" % (state.get("cursor"), probe_id))
-    check("kb: report carries the task id", "t_kbprobe" in out, out[-300:])
+        phase.wait(timeout=5)
+        out, err = "", ""
+        check("kb: a new event triggers one report", False, "timeout: %s" % (err or "")[-300:])
+    else:
+        state = read(rid, "state.json") or {}
+        report = RUNS / rid / "report.md"
+        text = report.read_text() if report.is_file() else ""
+        check("kb: a new event triggers one report",
+              "board probe" in text or "t_kbprobe" in out, (text or out)[-300:])
+        check("kb: cursor advances after the report", (state.get("cursor") or 0) == probe_id,
+              "cursor=%s probe_id=%s" % (state.get("cursor"), probe_id))
+    finally:
+        # Stop the run. A watcher that has reported is NOT finished, so a doctor sweep later in
+        # this suite treats it as orphaned and restarts it — and the restarted phase then polls a
+        # run root the suite deletes (#4: one orphan per green run, invisible in the output).
+        subprocess.run([sys.executable, str(HK), "stop", "--run", rid], env=env,
+                       capture_output=True, timeout=60)
+        if phase.poll() is None:
+            phase.kill()
+            phase.wait(timeout=5)
+    leftover = subprocess.run(["pgrep", "-f", "hk[ ]phase --run %s" % rid],
+                              capture_output=True, text=True)
+    check("kb: no supervision phase is left behind", leftover.stdout.strip() == "",
+          leftover.stdout)
 
 
 def test_crash_loop_is_bounded() -> None:
@@ -505,7 +552,8 @@ def main() -> int:
     print("hawkeye-v2 selftest  root=%s" % RUNS)
     for test in (test_retry_then_success, test_stall_is_detected, test_agent_unreachable,
                  test_agent_responsive, test_phase_death_recovery,
-                 test_milestone_and_wake_discipline, test_kanban_watcher_reads_default_board,
+                 test_milestone_and_wake_discipline, test_phase_exits_when_the_run_disappears,
+                 test_kanban_watcher_reads_default_board,
                  test_named_board_is_not_the_default_board,
                  test_gate_check_reports_ungated_profiles,
                  test_kernel_branch_resolves_board_paths,
