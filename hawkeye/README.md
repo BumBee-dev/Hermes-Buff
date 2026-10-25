@@ -231,6 +231,10 @@ HERMES_HOME="$HERMES_HOME" hermes plugins enable hermes-hawkeye-gate --no-allow-
 hermes plugins list | grep hawkeye        # "enabled" means it is active (the gateway hot-loads hooks)
 ```
 
+> Updating an already-enabled plugin is not automatic: copying new files over it leaves the **old module
+> running in the gateway**. Re-run `hermes plugins enable <name>` (that hot-reloads hooks) or restart the gateway.
+> This bites exactly once, on the machine where you iterate on the plugin.
+
 > The gate currently runs in `block`. If `hawkeye-gate.log` starts showing false positives, roll back with `HAWKEYE_GATE_MODE=warn` — no code change, no redeploy.
 > The cost of `block` is that **a false positive pins the card**.
 

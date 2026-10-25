@@ -29,6 +29,8 @@ cd /opt/hawkeye && python3 tests/selftest.py && python3 tests/gate_selftest.py
 # 3. Optional: register the completion gate as a Hermes plugin
 cp -a /opt/hawkeye/plugins/hermes-hawkeye-gate "$HERMES_HOME/plugins/"
 hermes plugins enable hermes-hawkeye-gate --no-allow-tool-override
+#    Replacing the files of an already-enabled plugin does NOT reload it:
+#    re-run the enable command (the gateway hot-reloads hooks) or restart it.
 
 # 4. Optional: let a timer close the loop while nobody is watching
 cp /opt/hawkeye/config/systemd/hawkeye-doctor.{service,timer} ~/.config/systemd/user/
