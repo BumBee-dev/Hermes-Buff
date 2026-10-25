@@ -172,7 +172,7 @@ noise bothers you.
 ## Self-tests
 
 ```bash
-python3 tests/selftest.py         # real subprocesses, 37 checks
+python3 tests/selftest.py         # real subprocesses, 39 checks
 python3 tests/gate_selftest.py    # synthetic board DBs, 29 checks
 ```
 

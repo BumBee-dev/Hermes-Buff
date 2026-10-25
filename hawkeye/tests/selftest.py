@@ -15,6 +15,7 @@ import json
 import os
 import shutil
 import signal
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -348,6 +349,53 @@ def test_gc_keeps_incidents() -> None:
     check("gc: only --force removes incidents too", not (RUNS / "gc-inc").exists())
 
 
+def test_named_board_is_not_the_default_board() -> None:
+    """`--board alt` has to watch alt's DB, not ``<home>/kanban.db``.
+
+    Until this test existed the fallback resolver returned the default DB for every
+    board, so a named-board watcher would report another board's cards with no error
+    at all. The event below is inserted only into the named board: if the watcher
+    reads the wrong DB it stays silent and the phase never reports.
+
+    The child runs with ``-S`` on purpose: on a host where ``hermes_cli`` is already
+    importable (this repository's own dev machine) the kernel branch would mask the
+    fallback, and the fallback is exactly what a bare host uses. ``-S`` drops
+    site-packages, so the kernel import fails and the portable path is exercised.
+    """
+    home = fixtures.make_hermes_home(BASE / "altboardhome")
+    alt_db = home / "kanban" / "boards" / "alt" / "kanban.db"
+    fixtures.build_kanban_db(alt_db)
+    fixtures.build_kanban_db(home / "kanban.db")
+    conf = cfg("altboard", kanban_quiet_seconds=0.6, poll_seconds=0.2)
+    rid = "altboard-1"
+    env = {k: v for k, v in ENV.items() if k != "HAWKEYE_KANBAN_DB"}
+    env.update({"HAWKEYE_V2_CONFIG": str(conf), "HERMES_HOME": str(home)})
+    phase = subprocess.Popen([sys.executable, "-S", str(HK), "kanban", "--id", rid, "--board", "alt"],
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
+    ready = wait_for(lambda: (read(rid, "state.json") or {}).get("cursor_ready"), 15)
+    check("alt: cursor aligned on the named board", bool(ready))
+
+    conn = sqlite3.connect(alt_db)
+    conn.execute("insert or replace into tasks (id,title,status,assignee,created_at)"
+                 " values ('t_altprobe','alt probe','done','dev-coder',1790000000)")
+    conn.execute("insert into task_events (task_id,run_id,kind,payload,created_at)"
+                 " values ('t_altprobe',1,'completed','{}',1790000001)")
+    conn.commit()
+    conn.close()
+
+    try:
+        out, err = phase.communicate(timeout=25)
+    except subprocess.TimeoutExpired:
+        phase.kill()
+        phase.communicate()
+        check("alt: an event on the named board triggers a report", False,
+              "no report within 25s: the watcher read another board's DB")
+        return
+    report = RUNS / rid / "report.md"
+    text = report.read_text() if report.is_file() else ""
+    check("alt: the named board's card is reported", "alt probe" in text, (text or out)[-300:])
+
+
 def main() -> int:
     if not HK.is_file():
         print("cannot find %s" % HK)
@@ -356,6 +404,7 @@ def main() -> int:
     for test in (test_retry_then_success, test_stall_is_detected, test_agent_unreachable,
                  test_agent_responsive, test_phase_death_recovery,
                  test_milestone_and_wake_discipline, test_kanban_watcher_reads_default_board,
+                 test_named_board_is_not_the_default_board,
                  test_crash_loop_is_bounded, test_gc_keeps_incidents, test_status_all):
         print("\n# %s" % test.__name__)
         try:

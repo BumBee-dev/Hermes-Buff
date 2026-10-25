@@ -32,13 +32,26 @@ def _kernel():
 
 
 def db_path(board: str | None = None) -> Path:
+    """Where this board's DB lives: kernel first, then the same layout by hand.
+
+    The fallback used to return ``<home>/kanban.db`` for *every* board, so a
+    named-board watcher silently read the default board instead — no error, wrong
+    cards reported. That is the v1 failure family again, so the fallback now
+    mirrors the kernel: ``default`` -> ``<home>/kanban.db``, anything else ->
+    ``<home>/kanban/boards/<slug>/kanban.db`` (missing file surfaces as a
+    FileNotFoundError from ``connect()``, never as the wrong board).
+    """
     try:
         return Path(_kernel().kanban_db_path(board))
     except Exception:
         env = os.environ.get("HAWKEYE_KANBAN_DB", "").strip()
-        if env:
+        slug = (board or "").strip()
+        if env and not slug:                     # the pin only applies without an explicit board
             return Path(env).expanduser()
-        return store.hermes_home() / "kanban.db"
+        home = store.hermes_home()
+        if not slug or slug == "default":
+            return home / "kanban.db"
+        return home / "kanban" / "boards" / slug / "kanban.db"
 
 
 def connect(board: str | None = None) -> sqlite3.Connection:

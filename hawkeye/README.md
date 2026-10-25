@@ -183,7 +183,8 @@ script that never goes through the agent or the model; the only thing that burns
 |---|---|
 | Phase exit → WebUI server-side wake turn | **Verified end to end** (2026-10-25 `drill-verify`: a 28-second task → phase exited at 14:52:49 → the source session received a wake, and the summary carried three milestones plus the `lease: hk lease` instruction) |
 | Wake-turn visibility | The wake turn appears on its own in the current WebUI build (observed 2026-10-25); no manual refresh needed |
-| `hk kanban` against named boards (non-default) | The path goes through the kernel function, so it is consistent in theory; **only the default board has been exercised end to end**, a named board is covered by the gate's own tests but not by a live dispatch |
+| `hk kanban` against named boards (non-default) | **Covered end to end** by `test_named_board_is_not_the_default_board`: a completion event inserted only into `boards/alt/kanban.db` is reported, and the watcher runs with site-packages disabled so the portable path is what gets exercised. A live multi-board dispatch has not been run against a real subagent yet |
+| Board resolution without the kernel (bare host) | **Fixed and regression-tested**: the fallback used to return `<home>/kanban.db` for *every* board, so a named-board watcher reported another board's cards with no error. It now mirrors the kernel layout, and a missing DB raises instead of silently reading the wrong board |
 | Wake channel from cron or a bare shell | **Not available, by design.** Waking depends on Hermes' `terminal(background, notify, persist_on_release)`. Started from cron, a systemd timer, or a plain shell there is no `notify_on_complete`, so you get `hk doctor` incidents and `fallback_command` alerts, but no wake turn. Use a Hermes-managed background process for the wake path |
 | Unreachable-agent incident (`agent_unreachable`) | **Verified deterministically** as of the current test suite: the test now waits for the report and for the lease to exceed `wake_grace_seconds` instead of relying on doctor startup being slow. The previous version flaked (2 of 3 runs) and the flake landed exactly on this path |
 | `fallback_command` external call | Implemented, empty by default; the reference host only had a WeChat bridge, so it was not configured or exercised |
@@ -194,7 +195,7 @@ script that never goes through the agent or the model; the only thing that burns
 ## 10. Self-tests
 
 ```bash
-python3 tests/selftest.py         # real subprocesses, 37 checks, ~25s (hk core)
+python3 tests/selftest.py         # real subprocesses, 39 checks, ~30s (hk core)
 python3 tests/gate_selftest.py    # synthetic board database, 29 checks (completion-gate plugin)
 ```
 
@@ -205,7 +206,8 @@ covers the window, because that assumption used to make it the one flaky test in
 Coverage: a failed retry reports only once / stall detection and process-group kill / no lease renewal raises an
 incident / no false alarm after a lease is renewed / **the job keeps running after the phase is SIGKILLed and
 doctor picks it up** / milestone merging and "no wake spam while nobody renews the lease" / **events on the
-default board database are readable and reported only once** / `status` aggregation. The gate plugin
+default board database are readable and reported only once** / **a named board is watched instead of the default
+board, with the kernel unavailable** / `status` aggregation. The gate plugin
 covers the three modes, the three evidence clauses, default versus named board lookup, worker board-number
 pinning, a register smoke test, and a bogus board name (no directory invented, no log line invented).
 
