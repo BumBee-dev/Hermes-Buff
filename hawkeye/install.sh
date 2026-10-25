@@ -210,10 +210,17 @@ fi
 step "4/5 agent skill"
 if [ "$DO_SKILL" = "0" ]; then
     note "skipped (--skip-skill)"
-elif [ -f "$REPO_DIR/skill/hermes-hawkeye-v2/SKILL.md" ]; then
+elif [ -d "$REPO_DIR/skill/hermes-hawkeye-v2" ]; then
     mkdir -p "$SKILL_DEST"
-    cp "$REPO_DIR/skill/hermes-hawkeye-v2/SKILL.md" "$SKILL_DEST/SKILL.md"
-    note "installed to $SKILL_DEST/SKILL.md"
+    # Copy the directory, not the entry file: SKILL.md points at references/*.md, and installing
+    # only SKILL.md left those pointers dangling on every fresh host.
+    cp -a "$REPO_DIR/skill/hermes-hawkeye-v2/." "$SKILL_DEST/"
+    for ref in $(grep -o 'references/[A-Za-z0-9._-]*\.md' "$REPO_DIR/skill/hermes-hawkeye-v2/SKILL.md" | sort -u); do
+        if [ ! -f "$SKILL_DEST/$ref" ]; then
+            die "skill install incomplete: SKILL.md points at $ref but it was not installed"
+        fi
+    done
+    note "installed to $SKILL_DEST/ (SKILL.md + references/)"
 else
     note "repository has no skill/ directory, nothing to install"
 fi

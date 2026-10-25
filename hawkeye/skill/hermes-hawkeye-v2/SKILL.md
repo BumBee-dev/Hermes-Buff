@@ -34,7 +34,9 @@ Python >= 3.11), this **skill** (the agent-side procedure), and an optional
   not proof that the remote content is what you think it is.
 - General practice for publishing internal tools lives in the
   `opensourcing-internal-tools` skill; this file keeps only what is specific to
-  hawkeye.
+  hawkeye. Release mechanics for this repo — pre-flight greps, creating the remote
+  without `gh`, verifying a push from the GitHub API, and what the installed-skill
+  symlink does *not* cover — are in `references/publishing.md`.
 
 ## When to use
 
@@ -187,16 +189,18 @@ noise bothers you.
 
 ### Issue maintenance loop (repo hygiene, separate from `hk runs`)
 
-Inbound reports on the public repo are serviced by a Hermes cron job, not by a
-phase: monitor = `issue-watch.py --json` (deterministic and read-only, so an
-unchanged repo produces an identical tick and suppresses the agent run entirely),
-state in the watch state file, output delivered to the chat. Two rules that cost
-the loop silently:
+Inbound reports on the public repo are watched by a **bounded in-session watcher**:
+`hk run --id <id> -- <script>` where the script polls `issue-watch.py --json` every few minutes
+(deterministic and read-only, so an unchanged repo produces an identical tick — 0 tokens) and
+prints one milestone line on news **or** on TTL expiry. The wake then lands in the chat that
+armed it, and the window always closes with a question instead of going quiet. cron is only for
+"nobody is here to see it": every fire opens a NEW session window and cannot deliver into an
+existing one. Two rules that cost the loop silently:
 
-- **Advance the seen-state strictly after the reply lands** (`--mark-seen` last).
-  The watcher posts as the account that owns the GitHub token, so a state advanced
-  before posting leaves your own reply behind as the next tick's "new comment" and
-  the next run answers itself.
+- **Advance the seen-state strictly after the reply lands** (`--mark-seen` last), and filter
+  comments authored by the token's own account (`--ignore-authors`). The watcher posts as the
+  account that owns the GitHub token, so a state advanced before posting leaves your own reply
+  behind as the next tick's "new comment" and the run answers itself.
 - **A delivered tick whose text is a sentinel rather than watcher JSON means the
   job's monitor was swapped** (delivery tests do exactly that). Fix the job, not
   the issue: the Cron section of the `hermes-agent` skill's background-systems

@@ -14,6 +14,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import shutil
 import signal
 import sqlite3
@@ -154,6 +155,51 @@ def test_stall_is_detected() -> None:
     check("stall: finishes within 10s (does not sit out the full 20s)", time.time() - started < 10,
           "%.1fs" % (time.time() - started))
     check("stall: incident left behind", (RUNS / rid / "incident.json").is_file())
+
+
+def test_stall_zero_disables_the_check() -> None:
+    """`stall_seconds = 0` is documented as "disable"; it used to mean "kill on the first tick".
+
+    The knob exists for the opposite case — a long job that is quiet by design (a watcher that
+    prints nothing for hours). Following the documented sentinel killed exactly that job in its
+    first poll, which is the worst possible failure: the configuration that says "trust this
+    process" is the one that destroys it.
+    """
+    conf = cfg("stall0", attempts=1, stall_seconds=0, attempt_timeout_seconds=30)
+    job = script("stall0.sh", "#!/bin/bash\necho started\nsleep 3\necho done\n")
+    rid = "stall0-1"
+    started = time.time()
+    hk(["run", "--id", rid, "--", "/bin/bash", str(job)], conf)
+    elapsed = time.time() - started
+    result = read(rid, "result.json") or {}
+    failed = [e for e in events(rid) if e["kind"] == "attempt_failed"]
+    check("stall0: a quiet job runs to completion when stall_seconds = 0",
+          result.get("reason") == "done", str(result))
+    check("stall0: nothing was killed as stalled", not failed, str(failed[:1]))
+    check("stall0: it waited for the job instead of the first tick", elapsed >= 2.5,
+          "%.1fs" % elapsed)
+
+
+def test_skill_ships_every_file_it_points_at() -> None:
+    """A skill that points at a file ships only if the installer copies it.
+
+    Two defects in one class: the references existed nowhere in the tree, and then they existed
+    in the tree but ``install.sh`` still copied a single file, so a fresh host got a SKILL.md
+    whose three pointers led nowhere. Checking the tree alone would have missed the second half.
+    """
+    repo = Path(__file__).resolve().parents[1]
+    skill_dir = repo / "skill" / "hermes-hawkeye-v2"
+    text = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
+    refs = sorted(set(re.findall(r"references/[A-Za-z0-9._-]+\.md", text)))
+    missing = [r for r in refs if not (skill_dir / r).is_file()]
+    check("skill: it points at references, and every one of them exists in the tree",
+          bool(refs) and not missing, "missing=%s" % (missing or "none found"))
+    installer = (repo / "install.sh").read_text(encoding="utf-8")
+    check("skill: install.sh copies the whole skill directory, not just SKILL.md",
+          'cp -a "$REPO_DIR/skill/hermes-hawkeye-v2/."' in installer,
+          "install.sh still copies SKILL.md alone")
+    check("skill: install.sh fails loudly if a referenced file was not installed",
+          "skill install incomplete" in installer, "no runtime assertion in install.sh")
 
 
 # ── 3. agent stops renewing -> doctor raises an incident ─────────────────
@@ -604,7 +650,9 @@ def main() -> int:
         print("cannot find %s" % HK)
         return 2
     print("hawkeye-v2 selftest  root=%s" % RUNS)
-    for test in (test_retry_then_success, test_stall_is_detected, test_agent_unreachable,
+    for test in (test_retry_then_success, test_stall_is_detected, test_stall_zero_disables_the_check,
+                 test_skill_ships_every_file_it_points_at,
+                 test_agent_unreachable,
                  test_agent_responsive, test_phase_death_recovery,
                  test_milestone_and_wake_discipline, test_phase_exits_when_the_run_disappears,
                  test_stop_kills_the_job_command,

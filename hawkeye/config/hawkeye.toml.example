@@ -11,7 +11,12 @@ attempt_timeout_seconds = 3600.0         # hard cap per attempt (timeout = kill 
 # ── Stall detection ─────────────────────────────────────────
 # If the job's output (work.log) stops growing for longer than this, treat it as stalled:
 # kill the process group and retry. Set to 0 to disable this criterion (leaving
-# attempt_timeout as the only backstop).
+# attempt_timeout as the only backstop) -- the sentinel is honoured, 0 does not mean
+# "kill on the first tick".
+#
+# A job that is quiet BY DESIGN (a watcher that prints nothing for hours) must either set
+# this to 0 or emit a heartbeat line every few polls; otherwise a correct, healthy process
+# is killed as stalled and retried on a loop.
 stall_seconds = 900.0
 poll_seconds = 2.0              # polling interval of the supervisor phase
 

@@ -187,9 +187,15 @@ class Phase:
         started = float(self.state.get("attempt_started") or 0)
         if started and time.time() - started > float(self.cfg["attempt_timeout_seconds"]):
             return "timeout"
-        age = store.mtime_age(self.rd / store.WORK_LOG)
-        if age is not None and age > float(self.cfg["stall_seconds"]):
-            return "stalled"
+        # 0 (or negative) disables the check, as the config comment promises. It has to be an
+        # explicit branch: without it, 0 means "older than zero seconds", i.e. kill on the first
+        # tick of any job that has written a single line -- the exact opposite of "trust this
+        # long, deliberately quiet process".
+        stall = float(self.cfg["stall_seconds"])
+        if stall > 0:
+            age = store.mtime_age(self.rd / store.WORK_LOG)
+            if age is not None and age > stall:
+                return "stalled"
         return ""
 
     def _kill(self, why: str) -> None:
