@@ -1,0 +1,39 @@
+Fix: bare response_format={"type":"json_object"} must produce a JSON grammar.
+
+A request carrying response_format={"type":"json_object"} without a "schema"
+field resolved to an empty object {} in oaicompat_chat_params_parse().
+Downstream, common/chat.cpp computes:
+
+    has_response_format = inputs.json_schema.is_object() && !inputs.json_schema.empty()
+
+so {} is indistinguishable from "no response_format at all" and no grammar is
+ever built. Clients that rely on JSON mode (e.g. structured-output pipelines) then get
+prose or fenced JSON back and fail to parse it.
+
+Use a minimal {"type":"object"} schema instead: same permissive semantics
+(any JSON object), but a grammar actually gets generated.
+
+---
+diff --git a/tools/server/server-common.cpp b/tools/server/server-common.cpp
+index 21c843c0d..b3ad66146 100644
+--- a/tools/server/server-common.cpp
++++ b/tools/server/server-common.cpp
+@@ -947,8 +947,17 @@ json oaicompat_chat_params_parse(
+         json response_format      = json_value(body, "response_format", json::object());
+         std::string response_type = json_value(response_format, "type", std::string());
+         if (response_type == "json_object") {
+-            if (response_format.contains("schema") || json_schema.empty()) {
++            if (response_format.contains("schema")) {
+                 json_schema = json_value(response_format, "schema", json::object());
++            } else if (json_schema.is_null()) {
++                // OpenAI semantics: "json_object" means "any JSON object". The old
++                // code fell through to an empty {} here, which downstream is
++                // indistinguishable from "no response_format" (see the
++                // has_response_format checks in common/chat.cpp), so the JSON
++                // grammar was silently never applied. An explicit {"type":"object"}
++                // schema keeps the same permissive semantics but actually produces
++                // a grammar, so the output is guaranteed to parse as a JSON object.
++                json_schema = json::parse(R"({"type":"object"})");
+             }
+         } else if (response_type == "json_schema") {
+             auto schema_wrapper = json_value(response_format, "json_schema", json::object());

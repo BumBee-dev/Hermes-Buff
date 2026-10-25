@@ -13,6 +13,7 @@ top-level `shared/` package rather than copied.
 | Directory | What it does | Status |
 |---|---|---|
 | [`hawkeye/`](hawkeye/) | Runs long, unattended tasks and kanban work outside of any single agent turn, reports progress back into the originating session, and recovers itself when the agent, the supervisor or the host dies. | Stable |
+| [`auxiliary-llm/`](auxiliary-llm/) | A self-hosted OpenAI-compatible inference stack — chat, embeddings and reranking from one llama.cpp build in three containers. Ships a one-shot `curl \| bash` installer. | Stable |
 
 ## Getting started
 
@@ -51,8 +52,13 @@ Architecture, the operating contract and the full command reference live in
 Hermes-Buff/
 ├── LICENSE              MIT, applies to every tool in this repository
 ├── README.md            this file
-└── hawkeye/             one tool, self-contained
+├── hawkeye/             long-running task supervision
+└── auxiliary-llm/       local inference stack (chat + embeddings + reranking)
 ```
+
+Tools that can install themselves ship an `install.sh` at their root
+(`auxiliary-llm` is the first one). Everything else is copy-and-run; no tool
+needs to be installed into Hermes itself.
 
 Every tool subdirectory carries its own README with install, usage and
 architecture notes. Read that first; this file stays deliberately short so it

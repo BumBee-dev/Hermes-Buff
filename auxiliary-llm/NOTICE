@@ -1,0 +1,47 @@
+# NOTICE — third-party components
+
+This project does not vendor third-party source code. It pins one upstream
+commit at build time, applies one local patch, and ships binaries derived from
+the projects below. Their licences and copyright notices are reproduced or
+linked here and must be preserved in any redistribution.
+
+## Build base
+
+**llama.cpp / ggml**
+- Source: https://github.com/ggml-org/llama.cpp
+- Licence: MIT — Copyright (c) 2023-2026 The ggml authors
+
+**llama-cpp-turboquant (TurboQuant + MTP integration)**
+- Source: https://github.com/TheTom/llama-cpp-turboquant
+- Pinned: tag `tqp-v0.4.0`, commit `bcb85fc3ae85efa0f5f392c6c880dfc524923860`
+- Licence: MIT — Copyright (c) 2023-2026 The ggml authors
+- Notes: this fork carries the C/CUDA implementation of TurboQuant (WHT rotation
+  plus PolarQuant scalar quantisation, `ggml/src/ggml-turbo-quant.c`,
+  `ggml/src/ggml-cuda/turbo*.{cu,cuh}`) and the upstream MTP speculative
+  decoding path. TurboQuant as a method originates from Google Research,
+  *Online Vector Quantization with Near-optimal Distortion Rate* (ICLR 2026).
+  This project claims no authorship over either.
+
+**Local patch** `config/buildCMD/patches/0001-json-object-grammar.patch`
+- Modifies `tools/server/server-common.cpp` of the above (MIT), and is therefore
+  distributed under the same MIT terms.
+- What it fixes: a request with `response_format={"type":"json_object"}` and no
+  `schema` field resolves to `{}`, which the JSON-grammar path treats as "no
+  response format at all", so no grammar is generated and clients get prose back.
+
+## Models (downloaded separately, not bundled)
+
+| Model | Upstream | Licence |
+|---|---|---|
+| Qwen3.5-4B (GGUF, MTP head) | https://huggingface.co/unsloth/Qwen3.5-4B-MTP-GGUF | Qwen licence (see the model card) |
+| bge-m3 embeddings | https://huggingface.co/ggml-org/bge-m3-Q8_0-GGUF | MIT — BAAI |
+| bge-reranker-v2-m3 | https://huggingface.co/gpustack/bge-reranker-v2-m3-GGUF | MIT — BAAI |
+
+Model weights are **not** included in this repository or in the published image.
+Download them yourself and comply with each model's own licence.
+
+## Trademarks
+
+Product and model names are used only to describe what this stack serves. This
+project is not affiliated with, endorsed by, or sponsored by Alibaba, BAAI,
+ggml-org, or the llama.cpp / TurboQuant maintainers.

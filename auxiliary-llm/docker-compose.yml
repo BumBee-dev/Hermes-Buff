@@ -1,0 +1,132 @@
+# auxiliary-llm — one llama.cpp runtime, three OpenAI-compatible roles
+#
+# Why one image for three services:
+#   * the same binary serves chat, embeddings and reranking; only the flags differ
+#   * one image to build, one CUDA toolchain to keep working, less disk
+#
+# Why the entrypoint wraps llama-server in `stdbuf -oL -eL`:
+#   llama-server fully buffers stdout when it is a pipe. Without the wrapper the
+#   startup lines (model load, KV allocation, backend init) sit in a 4 KiB buffer
+#   and `docker logs` stays empty for minutes — which makes a perfectly healthy
+#   start look like a hang.
+#
+# Everything tunable lives in .env. After editing it, `up -d` (not `restart`) —
+# restart does not re-read environment or compose changes.
+
+name: auxiliary-llm
+
+x-base: &base
+  image: ${AUX_IMAGE:-auxiliary-llm:latest}
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options:
+      max-size: "20m"
+      max-file: "3"
+  environment:
+    - NVIDIA_VISIBLE_DEVICES=all
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: 1
+            capabilities: [gpu]
+
+services:
+  # ── 1. LLM: chat completions (the only role that needs MTP/speculative decoding)
+  llm:
+    <<: *base
+    container_name: aux-llm
+    ports:
+      - "${LLM_PORT:-8888}:8080"
+    volumes:
+      - ${MODELS_DIR:-./models}:/models:ro
+    command: >
+      --host 0.0.0.0
+      --port 8080
+      --alias ${LLM_ALIAS:-aux-llm}
+      -m /models/${LLM_MODEL:-qwen3.5-4b-q8_0.gguf}
+      -ngl ${LLM_NGL:-99}
+      -t ${LLM_THREADS:-8}
+      -np 1
+      -c ${LLM_CTX:-65536}
+      -b ${LLM_BATCH:-1024}
+      -ub ${LLM_UBATCH:-512}
+      -ctk ${LLM_KV_K:-q8_0}
+      -ctv ${LLM_KV_V:-turbo4}
+      --flash-attn on
+      --cache-ram ${LLM_CACHE_RAM:-4096}
+      --spec-type ${LLM_SPEC_TYPE:-draft-mtp}
+      --spec-draft-n-max ${LLM_SPEC_N_MAX:-2}
+      --spec-draft-n-min-adaptive ${LLM_SPEC_N_MIN_ADAPTIVE:-2}
+      --temp ${LLM_TEMP:-0.5}
+      --top-p ${LLM_TOP_P:-0.7}
+      --top-k ${LLM_TOP_K:-20}
+      --repeat-penalty ${LLM_REPEAT_PENALTY:-1.1}
+      --reasoning off
+      --reasoning-budget 0
+      --n-predict ${LLM_N_PREDICT:-8192}
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 180s
+
+  # ── 2. Embeddings: --pooling cls is correct for bge-m3; the wrong pooling
+  #      silently degrades retrieval quality instead of erroring.
+  embedding:
+    <<: *base
+    container_name: aux-embedding
+    ports:
+      - "${EMBED_PORT:-1888}:8080"
+    volumes:
+      - ${MODELS_DIR:-./models}:/models:ro
+    command: >
+      --host 0.0.0.0
+      --port 8080
+      --alias ${EMBED_ALIAS:-aux-embedding}
+      -m /models/${EMBED_MODEL:-bge-m3-q8_0.gguf}
+      --embedding
+      --pooling cls
+      --no-webui
+      --cache-ram 0
+      -ngl 99
+      -c 8192
+      -b 4096
+      -ub 4096
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 90s
+
+  # ── 3. Reranker: cross-encoder scoring. Documents are truncated to the
+  #      context window above, so keep -c at or above your longest passage.
+  reranker:
+    <<: *base
+    container_name: aux-reranker
+    ports:
+      - "${RERANK_PORT:-1999}:8080"
+    volumes:
+      - ${MODELS_DIR:-./models}:/models:ro
+    command: >
+      --host 0.0.0.0
+      --port 8080
+      --alias ${RERANK_ALIAS:-aux-reranker}
+      -m /models/${RERANK_MODEL:-bge-reranker-v2-m3-q8_0.gguf}
+      --reranking
+      --no-webui
+      --cache-ram 0
+      -ngl 99
+      -c 4096
+      -b 4096
+      -ub 4096
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 90s
