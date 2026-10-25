@@ -1,7 +1,48 @@
 #!/usr/bin/env python3
-"""hk entry point — keeps ``lib/`` importable without installing anything."""
+"""hk entry point — keeps ``lib/`` importable without installing anything.
 
+Two guards before the real code runs:
+
+* **Interpreter override.** ``HAWKEYE_PYTHON`` names the interpreter hk should run
+  under. It exists for hosts whose system ``python3`` is older than 3.11 (no
+  ``tomllib``); point it at any Python >= 3.11, e.g. the one inside Hermes'
+  environment. The re-exec happens once and is guarded, so a bad value cannot loop.
+* **Version check.** hk itself is standard library only, but it does need 3.11+
+  (``tomllib``) and ``sqlite3``. Failing here with one clear line beats a traceback
+  about a missing module three layers deep.
+"""
+
+import os
 import sys
+
+_REEXEC_FLAG = "HAWKEYE_PY_REEXEC"
+
+_wanted = (os.environ.get("HAWKEYE_PYTHON") or "").strip()
+if (
+    _wanted
+    and os.environ.get(_REEXEC_FLAG) != "1"
+    and os.path.isfile(_wanted)
+    and os.access(_wanted, os.X_OK)
+    and os.path.realpath(_wanted) != os.path.realpath(sys.executable)
+):
+    os.environ[_REEXEC_FLAG] = "1"
+    try:
+        os.execv(_wanted, [_wanted] + sys.argv)
+    except OSError as exc:                       # fall through and run here instead
+        sys.stderr.write("hk: could not re-exec into %s (%s); continuing with %s\n"
+                         % (_wanted, exc, sys.executable))
+        os.environ.pop(_REEXEC_FLAG, None)
+
+if sys.version_info < (3, 11):
+    sys.exit("hk: needs Python >= 3.11 (found %d.%d at %s); set HAWKEYE_PYTHON to a newer interpreter"
+             % (sys.version_info[0], sys.version_info[1], sys.executable))
+try:
+    import sqlite3  # noqa: F401
+    import tomllib   # noqa: F401
+except ImportError as exc:
+    sys.exit("hk: %s is missing from %s; set HAWKEYE_PYTHON to a complete Python >= 3.11"
+             % (exc.name, sys.executable))
+
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))

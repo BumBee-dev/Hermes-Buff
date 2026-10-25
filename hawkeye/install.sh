@@ -22,6 +22,9 @@
 #                                          created from the example)
 #   HAWKEYE_KERNEL_SRC --kernel-src DIR    Hermes source checkout, for board resolution
 #                                          (default: unset -> the unit omits it)
+#   HAWKEYE_PYTHON     --python BIN        Interpreter hk should run under (default: the
+#                                          python3 on PATH). Set it when the system python
+#                                          is older than 3.11.
 
 set -euo pipefail
 
@@ -31,6 +34,7 @@ UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
 HAWKEYE_V2_CONFIG="${HAWKEYE_V2_CONFIG:-}"
 HAWKEYE_KERNEL_SRC="${HAWKEYE_KERNEL_SRC:-}"
+HAWKEYE_PYTHON="${HAWKEYE_PYTHON:-}"
 SKILL_DEST=""
 DO_ENABLE=1
 DO_SKILL=1
@@ -49,6 +53,7 @@ while [ $# -gt 0 ]; do
         --hermes-home)  HERMES_HOME="$2"; shift 2 ;;
         --config)       HAWKEYE_V2_CONFIG="$2"; shift 2 ;;
         --kernel-src)   HAWKEYE_KERNEL_SRC="$2"; shift 2 ;;
+        --python)       HAWKEYE_PYTHON="$2"; shift 2 ;;
         --unit-dir)     UNIT_DIR="$2"; shift 2 ;;
         --skill-dir)    SKILL_DEST="$2"; shift 2 ;;
         --no-enable)    DO_ENABLE=0; shift ;;
@@ -89,6 +94,12 @@ render_service() {
           else
               cat
           fi
+        } \
+      | { if [ -n "$HAWKEYE_PYTHON" ]; then
+              sed "/^\[Service\]/a Environment=HAWKEYE_PYTHON=$HAWKEYE_PYTHON"
+          else
+              cat
+          fi
         }
 }
 
@@ -98,13 +109,24 @@ note "hermes    : $HERMES_HOME"
 note "config    : $HAWKEYE_V2_CONFIG"
 note "kernel src: ${HAWKEYE_KERNEL_SRC:-<unset>}"
 note "units     : $UNIT_DIR"
-# A kernel path that is not a Hermes checkout costs the kernel branch silently:
-# board lookups fall back (board-aware, so still correct) and nobody notices until
-# someone wonders why the fallback is doing the work.
-if [ -n "$HAWKEYE_KERNEL_SRC" ] && [ ! -d "$HAWKEYE_KERNEL_SRC/hermes_cli" ]; then
-    note "WARNING   : $HAWKEYE_KERNEL_SRC has no hermes_cli/ directory"
-    note "            board resolution will use the fallback path; point --kernel-src"
-    note "            at the Hermes source checkout (the dir holding hermes_cli/)"
+# Board resolution either goes through the Hermes kernel or through hawkeye's portable
+# fallback. A path that looks wrong used to cost the kernel branch silently, so probe it
+# instead of trusting the string: the import needs hermes_bootstrap (which wires the
+# environment's site-packages), not just the right directory name.
+if [ -z "$HAWKEYE_KERNEL_SRC" ]; then
+    note "kernel    : not configured (board resolution uses the portable fallback)"
+elif [ ! -d "$HAWKEYE_KERNEL_SRC/hermes_cli" ]; then
+    note "kernel    : $HAWKEYE_KERNEL_SRC is not a Hermes checkout (no hermes_cli/)"
+    note "            board resolution uses the portable fallback"
+else
+    probe=$("${HAWKEYE_PYTHON:-python3}" "$REPO_DIR/config/scripts/kernel-probe.py" \
+            "$HAWKEYE_KERNEL_SRC" 2>&1 | head -1)
+    case "$probe" in
+        available*)   note "kernel    : $probe" ;;
+        unavailable*) note "kernel    : $probe"
+                      note "            board resolution uses the portable fallback" ;;
+        *)            note "kernel    : probe failed ($probe)" ;;
+    esac
 fi
 
 if [ "$PRINT_ONLY" = "1" ]; then

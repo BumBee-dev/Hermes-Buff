@@ -169,7 +169,23 @@ noise bothers you.
   fallback — the same failure family as the concatenated board path: no error, wrong
   result, and the only visible symptom is a latency figure that does not match what you
   expected.
-- **The board DB path must come from the kernel's `kanban_db_path()`**: the default
+- **Board resolution needs `hermes_bootstrap`, not the right interpreter.** `hermes_cli.kanban_db`
+  has its own dependencies (`ruamel` and friends) that live in the Hermes *environment's*
+  `site-packages`; importing the module straight from a bare interpreter fails no matter which
+  python you pick — including Hermes' own bundled one. Boot through `hermes_bootstrap` first,
+  exactly like Hermes' entry points do, and any Python ≥ 3.11 can host the kernel. That import
+  costs about 0.8 s once per process; cache the resolved path per board, never per tick.
+  `HAWKEYE_NO_KERNEL=1` forces the portable fallback when you need to compare the two.
+- **Never let that boot provision anything.** With `HERMES_HOME` unset, importing `hermes_cli`
+  resolves a default home and runs the lazy installer — measured: a single probe pulled 1.7 GB
+  of tools into `~/.hermes`. hk therefore refuses to boot the kernel without `HERMES_HOME`, and
+  holds `HERMES_DISABLE_LAZY_INSTALLS=1` around the import only (restored afterwards, not
+  inherited by jobs).
+- **The kernel ignores `HERMES_HOME` for the board root on purpose** (`kanban_home()` uses
+  `HERMES_KANBAN_HOME` or the machine root, because boards are shared across profiles). Any
+  test that points `HERMES_HOME` at a fixture and then resolves a board must set
+  `HAWKEYE_NO_KERNEL=1`, or it will happily read and write the real board.
+- The board DB path must come from the kernel's `kanban_db_path()`: the default
   board lives at `<HERMES_HOME>/kanban.db`, and concatenating
   `boards/<slug>/kanban.db` writes zero events without any error (this is exactly
   what killed v1).

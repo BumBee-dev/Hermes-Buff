@@ -135,6 +135,33 @@ After being woken: `kanban_show` to read the output → judge against the card's
 
 `--config FILE` / `$HAWKEYE_V2_CONFIG` select the config; `--root DIR` / `$HAWKEYE_V2_ROOT` select the run root (default `<HERMES_HOME>/hawkeye-v2/runs`).
 
+**Interpreter and module resolution** (this is where "missing module" surprises come from):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `HAWKEYE_PYTHON` | the `python3` on `PATH` | Interpreter hk re-execs into, once. Set it when the system python is older than 3.11 or incomplete; point it at Hermes' environment python. |
+| `HAWKEYE_KERNEL_SRC` | unset | Hermes source checkout, so `hermes_cli.kanban_db` can be imported for board paths |
+| `HAWKEYE_NO_KERNEL` | unset | `1` forces the portable fallback even when the kernel is importable — used by the tests, and handy when diagnosing |
+
+hk itself is standard library only (needs 3.11+ for `tomllib`, plus `sqlite3`). The kernel
+import is the one thing that needs third-party modules (`ruamel` among them), and those
+live in the Hermes **environment's** `site-packages`, not in any interpreter: hk boots
+through `hermes_bootstrap` exactly like Hermes' own entry points do, which is what puts
+them on `sys.path`. So the answer to "which venv" is: none in particular — the boot picks
+the environment, and any Python ≥ 3.11 can be the host for it. The first resolution costs
+about 0.8 s (importing the kernel's dependency graph); the result is cached per process
+afterwards (1000 lookups: 1.1 ms), so a watcher pays it once per start.
+
+Two guards make that boot safe to run from a 2-minute timer:
+
+* **`HERMES_HOME` must be set**, otherwise hk refuses to boot the kernel and uses the
+  fallback. With it unset, importing `hermes_cli` resolves a *default* home and provisions
+  it — measured: one probe downloaded 1.7 GB of tools into `~/.hermes`.
+* **Lazy installs are suppressed for the duration of the import**
+  (`HERMES_DISABLE_LAZY_INSTALLS=1`, Hermes' own opt-out, restored immediately after). A
+  health check must never provision anything, and the variable is not inherited by the
+  jobs hk spawns.
+
 ---
 
 ## 7. Operations
@@ -269,7 +296,7 @@ hermes plugins list | grep hawkeye        # "enabled" means it is active (the ga
 | Python ≥ 3.11 | Required | Uses `tomllib`; pure standard library, **no pip packages needed** |
 | Writable directory | Required | Default `<HERMES_HOME>/hawkeye-v2/runs`, changeable via `HAWKEYE_V2_ROOT` |
 | Hermes `terminal(background, notify, persist_on_release)` | Required for the scenarios | The wake channel. Built into Hermes, nothing extra to install |
-| `hermes_cli.kanban_db` (kernel source path) | Required for the board scenario | Taken from `HAWKEYE_KERNEL_SRC` (set it to `<HERMES_SRC>`); if unreadable, fallback path resolution is used |
+| `hermes_cli.kanban_db` (kernel source path) | Required for the board scenario | Taken from `HAWKEYE_KERNEL_SRC` (set it to `<HERMES_SRC>`), imported the way Hermes imports it (via `hermes_bootstrap`, so the environment's dependencies are on `sys.path`); if it still cannot be imported, fallback path resolution is used |
 | Hermes kanban (including the in-gateway dispatcher) | Required for the board scenario | `kanban.dispatch_in_gateway` defaults to true |
 | systemd --user | Optional | Only to run `hk doctor --fix` every 2 minutes |
 | Hermes plugin system + `pre_tool_call` | Optional | Only the completion gate needs it |
@@ -325,15 +352,21 @@ Note: `runs/` is state, not code — **do not copy it across hosts** (it holds t
 
 The doctor timer is a systemd `--user` unit, not a Hermes-managed service, so
 `hermes update` neither restarts nor removes it. That is deliberate: the fallback has
-to stay up exactly while the agent's own processes bounce. It also runs on the system
-interpreter — the unit's PATH resolves `python3` to `/usr/bin/python3`, not Hermes'
-bundled runtime — so replacing that runtime does not disable it.
+to stay up exactly while the agent's own processes bounce.
+
+Its module resolution is also upgrade-tolerant by construction: hk needs only the
+standard library itself, and when it wants the kernel it boots through
+`hermes_bootstrap` (the same first import Hermes' entry points use), which puts the
+environment's `site-packages` on `sys.path` at run time. Nothing pins an interpreter
+version or a `site-packages` path, so a new bundled Python or a rebuilt environment
+does not have to be reflected anywhere — and if the environment is gone, board lookups
+degrade to the portable fallback, which mirrors the kernel layout.
 
 What an upgrade *can* break is the coupling around it. Three checks, ten seconds:
 
 | Check | Command | If it fails |
 |---|---|---|
-| Kernel source path still exists | `test -d <HERMES_SRC>/hermes_cli && echo ok` | Point `--kernel-src` at the new checkout and rerun `./install.sh`; board lookups fall back in the meantime (the fallback is board-aware, so results stay correct — it just stops using the kernel) |
+| Kernel still resolvable | `python3 config/scripts/kernel-probe.py <HERMES_SRC>` (expects `available: …`) | Point `--kernel-src` at the new checkout and rerun `./install.sh`; board lookups fall back in the meantime (the fallback is board-aware, so results stay correct — it just stops using the kernel) |
 | Gate plugin still enabled | `hermes plugins list \| grep hawkeye` | `cp -a plugins/hermes-hawkeye-gate "<HERMES_HOME>/plugins/"` then `hermes plugins enable hermes-hawkeye-gate --no-allow-tool-override` |
 | Live config still present | `test -f <HERMES_HOME>/hawkeye-v2/hawkeye.toml && echo ok` | Recreate it from `config/hawkeye.toml.example`; the built-in defaults are byte-identical to the example, so nothing changes silently in the meantime |
 

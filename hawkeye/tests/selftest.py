@@ -266,7 +266,11 @@ def test_kanban_watcher_reads_default_board() -> None:
     fixtures.build_kanban_db(home / "kanban.db")
     conf = cfg("kb", kanban_quiet_seconds=0.6, poll_seconds=0.2)
     rid = "kb-1"
-    env = {**ENV, "HAWKEYE_V2_CONFIG": str(conf), "HERMES_HOME": str(home)}
+    # HAWKEYE_NO_KERNEL: the kernel's kanban_home() ignores HERMES_HOME by design (boards
+    # are shared across profiles, so it uses HERMES_KANBAN_HOME or the machine root).
+    # Without the opt-out this fixture test would resolve the real board and write to it.
+    env = {**ENV, "HAWKEYE_V2_CONFIG": str(conf), "HERMES_HOME": str(home),
+           "HAWKEYE_NO_KERNEL": "1"}
     phase = subprocess.Popen([sys.executable, str(HK), "kanban", "--id", rid, "--board", "default"],
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
     ready = wait_for(lambda: (read(rid, "state.json") or {}).get("cursor_ready"), 15)
@@ -357,10 +361,9 @@ def test_named_board_is_not_the_default_board() -> None:
     at all. The event below is inserted only into the named board: if the watcher
     reads the wrong DB it stays silent and the phase never reports.
 
-    The child runs with ``-S`` on purpose: on a host where ``hermes_cli`` is already
-    importable (this repository's own dev machine) the kernel branch would mask the
-    fallback, and the fallback is exactly what a bare host uses. ``-S`` drops
-    site-packages, so the kernel import fails and the portable path is exercised.
+    ``HAWKEYE_NO_KERNEL=1`` forces the portable path here on purpose. It used to be
+    ``-S``, but booting through ``hermes_bootstrap`` made the kernel importable even
+    without site-packages, so ``-S`` silently stopped testing the fallback.
     """
     home = fixtures.make_hermes_home(BASE / "altboardhome")
     alt_db = home / "kanban" / "boards" / "alt" / "kanban.db"
@@ -369,8 +372,9 @@ def test_named_board_is_not_the_default_board() -> None:
     conf = cfg("altboard", kanban_quiet_seconds=0.6, poll_seconds=0.2)
     rid = "altboard-1"
     env = {k: v for k, v in ENV.items() if k != "HAWKEYE_KANBAN_DB"}
-    env.update({"HAWKEYE_V2_CONFIG": str(conf), "HERMES_HOME": str(home)})
-    phase = subprocess.Popen([sys.executable, "-S", str(HK), "kanban", "--id", rid, "--board", "alt"],
+    env.update({"HAWKEYE_V2_CONFIG": str(conf), "HERMES_HOME": str(home),
+                "HAWKEYE_NO_KERNEL": "1"})
+    phase = subprocess.Popen([sys.executable, str(HK), "kanban", "--id", rid, "--board", "alt"],
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
     ready = wait_for(lambda: (read(rid, "state.json") or {}).get("cursor_ready"), 15)
     check("alt: cursor aligned on the named board", bool(ready))
@@ -396,6 +400,52 @@ def test_named_board_is_not_the_default_board() -> None:
     check("alt: the named board's card is reported", "alt probe" in text, (text or out)[-300:])
 
 
+def test_kernel_branch_resolves_board_paths() -> None:
+    """With a real checkout, board paths must come from ``kanban_db_path()``.
+
+    Booting through ``hermes_bootstrap`` is what makes the kernel importable outside a
+    Hermes process: ``hermes_cli.kanban_db`` has its own dependencies (measured:
+    ``ruamel``) that live in the environment's site-packages, not in the interpreter.
+    This test resolves paths only — it writes nothing. ``HERMES_KANBAN_HOME`` points at
+    a temp directory because the kernel deliberately ignores ``HERMES_HOME`` for the
+    board root.
+
+    Skips when the checkout cannot be imported (a bare host): the fallback path is
+    covered by the two tests above, and there is nothing to assert about a kernel that
+    is not installed.
+    """
+    src = os.environ.get("HAWKEYE_KERNEL_SRC", "").strip()
+    if not src:
+        print("  SKIP kernel branch: HAWKEYE_KERNEL_SRC is not set")
+        return
+    home = BASE / "khome"
+    code = (
+        "import os, sys\n"
+        "sys.path.insert(0, %r)\n"
+        "from hawkeye import kanban\n"
+        "p_alt = kanban.db_path('alt')\n"
+        "p_def = kanban.db_path('default')\n"
+        "print('KERNEL' if kanban._KERNEL not in (None, False) else 'FALLBACK')\n"
+        "print(p_alt)\n"
+        "print(p_def)\n"
+    ) % str(HK.parents[1] / "lib")
+    env = {**ENV, "HAWKEYE_KERNEL_SRC": src, "HERMES_KANBAN_HOME": str(home),
+           "HERMES_HOME": str(home)}
+    env.pop("HAWKEYE_NO_KERNEL", None)
+    env.pop("HAWKEYE_KANBAN_DB", None)
+    proc = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                          timeout=180, env=env)
+    lines = proc.stdout.strip().splitlines()
+    if not lines or lines[0] != "KERNEL":
+        tail = (proc.stderr or "").strip().splitlines()[-1:] or ["no output"]
+        print("  SKIP kernel branch: not importable from %s (%s)" % (src, tail[0]))
+        return
+    check("kernel: named board comes from kanban_db_path()",
+          lines[1] == str(home / "kanban" / "boards" / "alt" / "kanban.db"), lines[1])
+    check("kernel: default board stays at <root>/kanban.db",
+          lines[2] == str(home / "kanban.db"), lines[2])
+
+
 def main() -> int:
     if not HK.is_file():
         print("cannot find %s" % HK)
@@ -405,6 +455,7 @@ def main() -> int:
                  test_agent_responsive, test_phase_death_recovery,
                  test_milestone_and_wake_discipline, test_kanban_watcher_reads_default_board,
                  test_named_board_is_not_the_default_board,
+                 test_kernel_branch_resolves_board_paths,
                  test_crash_loop_is_bounded, test_gc_keeps_incidents, test_status_all):
         print("\n# %s" % test.__name__)
         try:

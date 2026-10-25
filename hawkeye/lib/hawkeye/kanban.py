@@ -13,22 +13,80 @@ import os
 import sqlite3
 import sys
 from pathlib import Path
+from typing import Any
 
 from . import store
+
+
+_KERNEL: Any = None            # module once resolved, False when it cannot be imported
+_KERNEL_TRIED = False
 
 
 def _kernel():
     """Import the Hermes module that owns the board layout.
 
-    A real Hermes process already has it on ``sys.path``. ``HAWKEYE_KERNEL_SRC``
-    exists only for out-of-process callers pointing at a source checkout; no
-    machine path is baked in, so the same code runs anywhere.
+    Three steps, cheapest first, because this runs inside processes that may live for
+    hours and must not pay a 1.5 s import more than once:
+
+    1. A real Hermes process already has the module on ``sys.path``.
+    2. Otherwise boot the way Hermes boots: import ``hermes_bootstrap``, which is
+       stdlib-only and responsible for putting the environment's ``site-packages`` on
+       ``sys.path``. Without it, ``hermes_cli.kanban_db`` dies on its own dependencies
+       (measured here: ``ModuleNotFoundError: ruamel``) even under Hermes' own bundled
+       interpreter — the interpreter is not what carries the modules, the boot does.
+    3. If both fail, the caller falls back to :func:`_fallback_db`, which mirrors the
+       kernel layout and refuses to guess.
+
+    ``HAWKEYE_KERNEL_SRC`` exists only for out-of-process callers pointing at a source
+    checkout; no machine path is baked in, so the same code runs anywhere.
     """
+    global _KERNEL, _KERNEL_TRIED
+    if _KERNEL_TRIED:
+        if _KERNEL is False:
+            raise ImportError("hermes_cli is not importable here")
+        return _KERNEL
+    _KERNEL_TRIED = True
+
+    # Explicit opt-out: makes the portable path selectable on a host where the kernel
+    # *is* importable, which is what the fallback tests need to stay deterministic.
+    if (os.environ.get("HAWKEYE_NO_KERNEL") or "").strip().lower() in ("1", "true", "yes"):
+        _KERNEL = False
+        raise ImportError("kernel disabled by HAWKEYE_NO_KERNEL")
+
     src = os.environ.get("HAWKEYE_KERNEL_SRC", "").strip()
     if src and src not in sys.path:
         sys.path.insert(0, src)
-    from hermes_cli import kanban_db
-    return kanban_db
+
+    # Booting the kernel must never provision anything. Importing hermes_cli can trigger
+    # Hermes' lazy install, and with HERMES_HOME unset it resolves a *default* home and
+    # provisions there — measured: 1.7 GB of tools downloaded into ~/.hermes by one probe.
+    # Two guards: refuse without a configured home, and hold the official opt-out for the
+    # duration of the import only, so nothing is inherited by the jobs we spawn.
+    if not (os.environ.get("HERMES_HOME") or "").strip():
+        _KERNEL = False
+        raise ImportError("HERMES_HOME is not set; refusing to boot the kernel")
+
+    prev_lazy = os.environ.get("HERMES_DISABLE_LAZY_INSTALLS")
+    os.environ["HERMES_DISABLE_LAZY_INSTALLS"] = "1"
+    try:
+        try:
+            from hermes_cli import kanban_db
+        except Exception:
+            import hermes_bootstrap  # noqa: F401  (wires the environment's site-packages)
+            from hermes_cli import kanban_db
+        _KERNEL = kanban_db
+        return _KERNEL
+    except Exception:
+        _KERNEL = False
+        raise ImportError("hermes_cli is not importable here") from None
+    finally:
+        if prev_lazy is None:
+            os.environ.pop("HERMES_DISABLE_LAZY_INSTALLS", None)
+        else:
+            os.environ["HERMES_DISABLE_LAZY_INSTALLS"] = prev_lazy
+
+
+_DB_CACHE: dict[tuple, Path] = {}
 
 
 def db_path(board: str | None = None) -> Path:
@@ -40,7 +98,21 @@ def db_path(board: str | None = None) -> Path:
     mirrors the kernel: ``default`` -> ``<home>/kanban.db``, anything else ->
     ``<home>/kanban/boards/<slug>/kanban.db`` (missing file surfaces as a
     FileNotFoundError from ``connect()``, never as the wrong board).
+
+    Results are cached per process: resolving through the kernel costs an import of
+    its whole dependency graph, and a watcher asks for the same board every tick.
     """
+    key = ((board or "").strip(), os.environ.get("HAWKEYE_KANBAN_DB", "").strip(),
+           os.environ.get("HERMES_HOME", "").strip())
+    cached = _DB_CACHE.get(key)
+    if cached is not None:
+        return cached
+    path = _db_path_uncached(board)
+    _DB_CACHE[key] = path
+    return path
+
+
+def _db_path_uncached(board: str | None = None) -> Path:
     try:
         return Path(_kernel().kanban_db_path(board))
     except Exception:
