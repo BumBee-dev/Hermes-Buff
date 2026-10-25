@@ -145,6 +145,11 @@ After being woken: `kanban_show` to read the output → judge against the card's
 ./install.sh --print-only                  # inspect the rendered units without writing
 systemctl --user list-timers | grep hawkeye
 
+# The live config lands in <HERMES_HOME>/hawkeye-v2/hawkeye.toml, created from
+# config/hawkeye.toml.example. Keep it out of the repository: it belongs to the
+# host, and a config inside the code tree is the thing that gets committed by
+# accident.
+
 # Day to day
 bin/hk status --all
 bin/hk doctor --fix

@@ -17,8 +17,9 @@
 #
 # Overrides (env or flag):
 #   HERMES_HOME        --hermes-home DIR   Hermes home (default: $HOME/.hermes)
-#   HAWKEYE_V2_CONFIG  --config FILE       hawkeye.toml path (default: config/hawkeye.toml
-#                                          next to this script, created from the example)
+#   HAWKEYE_V2_CONFIG  --config FILE       hawkeye.toml path (default:
+#                                          $HERMES_HOME/hawkeye-v2/hawkeye.toml,
+#                                          created from the example)
 #   HAWKEYE_KERNEL_SRC --kernel-src DIR    Hermes source checkout, for board resolution
 #                                          (default: unset -> the unit omits it)
 
@@ -28,7 +29,7 @@ REPO_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 UNIT_SRC="$REPO_DIR/config/systemd"
 UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
-HAWKEYE_V2_CONFIG="${HAWKEYE_V2_CONFIG:-$REPO_DIR/config/hawkeye.toml}"
+HAWKEYE_V2_CONFIG="${HAWKEYE_V2_CONFIG:-}"
 HAWKEYE_KERNEL_SRC="${HAWKEYE_KERNEL_SRC:-}"
 SKILL_DEST=""
 DO_ENABLE=1
@@ -67,6 +68,11 @@ sys.exit(0 if sys.version_info >= (3, 11) else 1)
 PY
 
 HERMES_HOME="${HERMES_HOME/#\~/$HOME}"
+# Derive the config default only now: --hermes-home may have just moved HERMES_HOME,
+# and resolving it up top silently kept an inherited value instead (measured: with
+# HERMES_HOME exported in the environment, --hermes-home /tmp/x still wrote to the
+# inherited home).
+HAWKEYE_V2_CONFIG="${HAWKEYE_V2_CONFIG:-$HERMES_HOME/hawkeye-v2/hawkeye.toml}"
 HAWKEYE_V2_CONFIG="${HAWKEYE_V2_CONFIG/#\~/$HOME}"
 SKILL_DEST="${SKILL_DEST:-$HERMES_HOME/skills/software-development/hermes-hawkeye-v2}"
 
