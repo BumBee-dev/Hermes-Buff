@@ -98,6 +98,14 @@ note "hermes    : $HERMES_HOME"
 note "config    : $HAWKEYE_V2_CONFIG"
 note "kernel src: ${HAWKEYE_KERNEL_SRC:-<unset>}"
 note "units     : $UNIT_DIR"
+# A kernel path that is not a Hermes checkout costs the kernel branch silently:
+# board lookups fall back (board-aware, so still correct) and nobody notices until
+# someone wonders why the fallback is doing the work.
+if [ -n "$HAWKEYE_KERNEL_SRC" ] && [ ! -d "$HAWKEYE_KERNEL_SRC/hermes_cli" ]; then
+    note "WARNING   : $HAWKEYE_KERNEL_SRC has no hermes_cli/ directory"
+    note "            board resolution will use the fallback path; point --kernel-src"
+    note "            at the Hermes source checkout (the dir holding hermes_cli/)"
+fi
 
 if [ "$PRINT_ONLY" = "1" ]; then
     step "rendered hawkeye-doctor.service"

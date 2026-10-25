@@ -320,3 +320,25 @@ hawkeye/
 ```
 
 Note: `runs/` is state, not code — **do not copy it across hosts** (it holds that host's pids and timestamps).
+
+### After a Hermes upgrade
+
+The doctor timer is a systemd `--user` unit, not a Hermes-managed service, so
+`hermes update` neither restarts nor removes it. That is deliberate: the fallback has
+to stay up exactly while the agent's own processes bounce. It also runs on the system
+interpreter — the unit's PATH resolves `python3` to `/usr/bin/python3`, not Hermes'
+bundled runtime — so replacing that runtime does not disable it.
+
+What an upgrade *can* break is the coupling around it. Three checks, ten seconds:
+
+| Check | Command | If it fails |
+|---|---|---|
+| Kernel source path still exists | `test -d <HERMES_SRC>/hermes_cli && echo ok` | Point `--kernel-src` at the new checkout and rerun `./install.sh`; board lookups fall back in the meantime (the fallback is board-aware, so results stay correct — it just stops using the kernel) |
+| Gate plugin still enabled | `hermes plugins list \| grep hawkeye` | `cp -a plugins/hermes-hawkeye-gate "<HERMES_HOME>/plugins/"` then `hermes plugins enable hermes-hawkeye-gate --no-allow-tool-override` |
+| Live config still present | `test -f <HERMES_HOME>/hawkeye-v2/hawkeye.toml && echo ok` | Recreate it from `config/hawkeye.toml.example`; the built-in defaults are byte-identical to the example, so nothing changes silently in the meantime |
+
+A run that finishes during the upgrade window can lose its single wake, because the
+session it was reporting into is restarting. That case is covered: once
+`wake_grace_seconds` (900 by default) passes with no renewal, `hk doctor` files
+`agent_unreachable` and `fallback_command` is the out-of-band alert. The job itself is
+detached and keeps running throughout the upgrade.
