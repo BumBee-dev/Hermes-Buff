@@ -180,6 +180,62 @@ def test_stall_zero_disables_the_check() -> None:
           "%.1fs" % elapsed)
 
 
+def procs_running(marker: str) -> list[int]:
+    """Pids whose argv contains *marker* -- the only way to see a reparented command.
+
+    A survivor is reparented to init, so no pid the run recorded is trustworthy any more; the
+    question is whether any process still runs this argv.
+    """
+    found: list[int] = []
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            argv = ((entry / "cmdline").read_bytes()
+                    .replace(b"\0", b" ")
+                    .decode("utf-8", "replace"))
+        except OSError:
+            continue
+        if marker in argv:
+            found.append(int(entry.name))
+    return found
+
+
+def test_hang_kill_reaches_the_job_command() -> None:
+    """A timeout/stall kill must kill the command, not just the ``hk job`` wrapper (#8).
+
+    Two process groups are involved: the phase spawns the wrapper with start_new_session=True and
+    the wrapper spawns the command the same way, so a kill aimed at state[job_pid] reaches the
+    wrapper alone. Measured before the fix: the run reported gaveup while ``sleep`` kept running
+    reparented to init, with job.pid already deleted -- a report about a job that is still alive
+    and no way left on disk to find it.
+    """
+    cases = [("timeout", cfg("timeoutkill", attempts=1, attempt_timeout_seconds=2,
+                             poll_seconds=0.2, stall_seconds=0), "sleep 9773"),
+             ("stalled", cfg("stallkill", attempts=1, attempt_timeout_seconds=60,
+                             poll_seconds=0.2, stall_seconds=0.8), "sleep 9774")]
+    for why, conf, marker in cases:
+        rid = "hangkill-%s" % why
+        started = time.time()
+        hk(["run", "--id", rid, "--", "/bin/bash", "-c", marker], conf, timeout=60)
+        elapsed = time.time() - started
+        result = read(rid, "result.json") or {}
+        killed = [e for e in events(rid) if e["kind"] == "job_killed"]
+        leftovers = procs_running(marker)
+        check("%s: the run gave up on the hang" % why, result.get("reason") == "gaveup",
+              str(result))
+        check("%s: the kill names the wrapper and the command" % why,
+              bool(killed) and killed[0].get("pid") and killed[0].get("wrapper")
+              and killed[0]["pid"] != killed[0]["wrapper"], str(killed[:1]))
+        check("%s: no process still runs the command after the run ended" % why, not leftovers,
+              "still alive: %s" % leftovers)
+        check("%s: the give-up does not wait longer than the hang" % why, elapsed < 15,
+              "%.1fs" % elapsed)
+        for pid in leftovers:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(os.getpgid(pid), signal.SIGKILL)
+
+
 def test_skill_ships_every_file_it_points_at() -> None:
     """A skill that points at a file ships only if the installer copies it.
 
@@ -1004,6 +1060,7 @@ def main() -> int:
         return 2
     print("hawkeye-v2 selftest  root=%s" % RUNS)
     for test in (test_retry_then_success, test_stall_is_detected, test_stall_zero_disables_the_check,
+                 test_hang_kill_reaches_the_job_command,
                  test_skill_ships_every_file_it_points_at,
                  test_watch_file_exits_when_the_producer_writes,
                  test_nothing_is_written_at_the_hermes_home_root,

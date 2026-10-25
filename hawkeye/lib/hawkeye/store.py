@@ -11,6 +11,7 @@ import contextlib
 import fcntl
 import json
 import os
+import signal
 import time
 from pathlib import Path
 from typing import Any, Iterator
@@ -234,6 +235,43 @@ def pid_alive(pid: int | None, start_ticks: int | None = None) -> bool:
     if state == "Z":
         return False
     return start_ticks is None or ticks == start_ticks
+
+
+def _signal_group(pid: int, sig: int) -> None:
+    try:
+        os.killpg(os.getpgid(pid), sig)
+    except (ProcessLookupError, PermissionError):
+        try:
+            os.kill(pid, sig)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+
+def reap(targets: list[tuple[int, int | None]]) -> list[int]:
+    """SIGTERM every live target, escalate to SIGKILL, and return the pids still alive.
+
+    A shell waiting on a foreground child defers SIGTERM, so one signal is not a kill. Every
+    caller holds pids of processes in their own session -- the ``hk job`` wrapper, and the command
+    that wrapper started -- so each target is signalled as a group.
+    """
+    live = [(pid, ticks) for pid, ticks in targets if pid_alive(pid, ticks)]
+    for pid, _ticks in live:
+        _signal_group(pid, signal.SIGTERM)
+    survivors: list[int] = []
+    for pid, ticks in live:
+        for _attempt in range(20):
+            if not pid_alive(pid, ticks):
+                break
+            time.sleep(0.05)
+        else:
+            _signal_group(pid, signal.SIGKILL)
+        for _attempt in range(20):
+            if not pid_alive(pid, ticks):
+                break
+            time.sleep(0.05)
+        else:
+            survivors.append(pid)
+    return survivors
 
 
 @contextlib.contextmanager

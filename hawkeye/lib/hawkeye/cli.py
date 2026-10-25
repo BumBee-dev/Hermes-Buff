@@ -7,7 +7,6 @@ import hashlib
 import json
 import os
 import shutil
-import signal
 import sys
 import time
 from pathlib import Path
@@ -295,38 +294,6 @@ def cmd_events(args: argparse.Namespace, cfg: dict) -> int:
     return 0
 
 
-def _reap(targets: list[tuple[int, int | None]]) -> list[int]:
-    """SIGTERM every live target, escalate to SIGKILL, and return the pids still alive.
-
-    A shell waiting on a foreground child defers SIGTERM, so one signal is not a stop.
-    """
-    for target, ticks in targets:
-        if not store.pid_alive(target, ticks):
-            continue
-        try:
-            os.killpg(os.getpgid(target), signal.SIGTERM)
-        except (ProcessLookupError, PermissionError):
-            pass
-    survivors: list[int] = []
-    for target, ticks in targets:
-        for _ in range(20):
-            if not store.pid_alive(target, ticks):
-                break
-            time.sleep(0.05)
-        else:
-            try:
-                os.killpg(os.getpgid(target), signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                pass
-        for _ in range(20):
-            if not store.pid_alive(target, ticks):
-                break
-            time.sleep(0.05)
-        else:
-            survivors.append(target)
-    return survivors
-
-
 def cmd_stop(args: argparse.Namespace, cfg: dict) -> int:
     rd = store.run_dir(args.run)
     state = store.read_json(rd / store.STATE, {}) or {}
@@ -353,7 +320,7 @@ def cmd_stop(args: argparse.Namespace, cfg: dict) -> int:
     cmd_pid = job_mod.command_pid(rd)
     if cmd_pid and cmd_pid != pid:
         targets.append((cmd_pid, None))
-    survivors = _reap(targets)
+    survivors = store.reap(targets)
     if not already:
         store.append_event(rd, "run_stopped", survivors=survivors or None)
         print("stopped %s" % args.run)

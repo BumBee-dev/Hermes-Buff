@@ -19,7 +19,6 @@ Three rules keep that channel honest:
 from __future__ import annotations
 
 import os
-import signal
 import subprocess
 import sys
 import time
@@ -132,24 +131,37 @@ class Phase:
         just cancelled. Nothing durable is written either -- ``cmd_stop`` owns state.json
         while it is stopping.
         """
-        self._kill_own_child("stop")
+        self._kill_attempt("stop")
         store.append_event(self.rd, "phase_exit", reason="stopped")
         return 0
 
-    def _kill_own_child(self, why: str) -> None:
-        """Kill the attempt this phase spawned, if anything of it is still alive.
+    def _kill_attempt(self, why: str) -> list[int]:
+        """Kill the attempt this phase started -- wrapper AND command -- and report survivors.
 
-        The wrapper lives in its own session and the command in a second one, so a pid is the
-        only handle that reaches both once the phase stops supervising them.
+        Two process groups are involved and both need a handle: the phase spawns the ``hk job``
+        wrapper with start_new_session=True, and the wrapper spawns the command the same way.
+        Signalling the wrapper group therefore reaches the wrapper alone, leaving the real work
+        running with nobody supervising it while ``_clear_job_files`` deletes the only pointer to
+        it (#8). One kill path serves the unattended hang kill and ``stop`` alike.
         """
         wrapper = self._child.pid if self._child is not None else None
-        self._child = None
-        if wrapper and store.pid_alive(wrapper):
-            _signal_group(wrapper, signal.SIGTERM)
+        if wrapper is None and self.state.get("job_pid"):
+            wrapper = int(self.state["job_pid"])
         command = job_mod.command_pid(self.rd)
-        if command and store.pid_alive(command):
-            _signal_group(command, signal.SIGTERM)
-            store.append_event(self.rd, "job_killed", reason=why, pid=command)
+        targets: list[tuple[int, int | None]] = []
+        if wrapper:
+            targets.append((wrapper, self.state.get("job_pid_ticks")))
+        if command and command != wrapper:
+            targets.append((command, None))
+        self._child = None
+        if not targets:
+            return []
+        survivors = store.reap(targets)
+        # Name both pids: once the attempt is cleared nothing on disk points at the command, so a
+        # survivor has to be findable from the events alone.
+        store.append_event(self.rd, "job_killed", reason=why, pid=targets[-1][0],
+                           wrapper=targets[0][0], survivors=survivors or None)
+        return survivors
 
     # ── advance: dispatch ─────────────────────────────────────────────────
     def _advance(self) -> tuple[bool, str]:
@@ -171,7 +183,7 @@ class Phase:
         if status in ("running", "finishing"):
             hang = self._hang_reason()
             if hang:
-                self._kill(hang)
+                self._kill_attempt(hang)
                 return self._fail(124, hang)
             return False, "milestone" if self._milestone_pending() else "running"
         code = job_mod.exit_code(self.rd)
@@ -215,7 +227,7 @@ class Phase:
         except _Stopped:
             # The stop landed between the tick check and the spawn. This wrapper is ours and
             # nothing else knows its pid, so kill it here or it becomes invisible work.
-            self._kill_own_child("stopped")
+            self._kill_attempt("stopped")
             raise
         store.append_event(self.rd, "attempt_start", attempt=attempt, pid=proc.pid)
 
@@ -259,20 +271,6 @@ class Phase:
             if age is not None and age > stall:
                 return "stalled"
         return ""
-
-    def _kill(self, why: str) -> None:
-        pid = self.state.get("job_pid")
-        if not pid:
-            return
-        pid = int(pid)
-        ticks = self.state.get("job_pid_ticks")
-        _signal_group(pid, signal.SIGTERM)
-        deadline = time.time() + 5.0
-        while time.time() < deadline and store.pid_alive(pid, ticks):
-            time.sleep(0.1)
-        if store.pid_alive(pid, ticks):
-            _signal_group(pid, signal.SIGKILL)
-        store.append_event(self.rd, "job_killed", reason=why, pid=pid)
 
     def _sample_log(self) -> None:
         """Read only new bytes; collect ``<prefix>`` milestone lines the job prints."""
@@ -463,16 +461,6 @@ class Phase:
                 "detail": "gave up after %d attempts, last exit code %s"
                           % (self._attempts_done(), payload["last_exit_code"]),
             })
-
-
-def _signal_group(pid: int, sig: int) -> None:
-    try:
-        os.killpg(os.getpgid(pid), sig)
-    except (ProcessLookupError, PermissionError):
-        try:
-            os.kill(pid, sig)
-        except (ProcessLookupError, PermissionError):
-            pass
 
 
 def _clip(text: str, limit: int) -> str:
