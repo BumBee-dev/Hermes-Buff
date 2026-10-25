@@ -14,6 +14,35 @@ top-level `shared/` package rather than copied.
 |---|---|---|
 | [`hawkeye/`](hawkeye/) | Runs long, unattended tasks and kanban work outside of any single agent turn, reports progress back into the originating session, and recovers itself when the agent, the supervisor or the host dies. | Stable |
 
+## Getting started
+
+Every tool is self-contained: nothing is installed into Hermes itself, and no
+tool needs third-party Python packages.
+
+```bash
+# 1. Put the tool somewhere stable (any path works)
+cp -a hawkeye /opt/hawkeye
+
+# 2. Smoke-test it — portable, read-only, ~20s
+cd /opt/hawkeye && python3 tests/selftest.py && python3 tests/gate_selftest.py
+
+# 3. Optional: register the completion gate as a Hermes plugin
+cp -a /opt/hawkeye/plugins/hermes-hawkeye-gate "$HERMES_HOME/plugins/"
+hermes plugins enable hermes-hawkeye-gate --no-allow-tool-override
+
+# 4. Optional: let a timer close the loop while nobody is watching
+cp /opt/hawkeye/config/systemd/hawkeye-doctor.{service,timer} ~/.config/systemd/user/
+#    edit ExecStart / Environment in the .service to match your paths first
+systemctl --user daemon-reload && systemctl --user enable --now hawkeye-doctor.timer
+```
+
+Requirements: Python 3.11 or newer. The board-aware parts additionally need a
+Hermes installation whose `hermes_cli.kanban_db` is importable (point
+`HAWKEYE_KERNEL_SRC` at the source checkout when running outside Hermes).
+
+Architecture, the operating contract and the full command reference live in
+[hawkeye/README.md](hawkeye/README.md).
+
 ## Layout
 
 ```

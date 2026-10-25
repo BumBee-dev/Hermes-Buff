@@ -13,9 +13,9 @@ Type=oneshot
 # 3) HAWKEYE_KERNEL_SRC    -> path to your Hermes kernel source checkout (board-scenario path resolution)
 # 4) ExecStart             -> the hk entry point of this repository, e.g. <REPO_DIR>/bin/hk
 Environment=HERMES_HOME=/home/<user>/.hermes
-Environment=HAWKEYE_V2_CONFIG=/opt/hermes-hawkeye-v2/config/hawkeye.toml
+Environment=HAWKEYE_V2_CONFIG=/opt/hawkeye/config/hawkeye.toml
 Environment=HAWKEYE_KERNEL_SRC=/home/<user>/src/hermes
-ExecStart=/opt/hermes-hawkeye-v2/bin/hk doctor --fix
+ExecStart=/opt/hawkeye/bin/hk doctor --fix
 # Exit code 1 means "an incident exists" (so `systemctl --user status` shows it at a glance);
 # it is not a failure and must not flood the journal.
 SuccessExitStatus=0 1
