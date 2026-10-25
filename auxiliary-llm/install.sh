@@ -106,8 +106,8 @@ TMP=$(mktemp -d "${TMPDIR:-/tmp}/auxiliary-llm.XXXXXX")
 trap 'rm -rf "$TMP"' EXIT
 
 if [ "$FETCH" = git ]; then
-    git clone --depth 1 --branch "$AUX_INS_REF" --filter=blob:none --sparse \
-        "$AUX_INS_REPO" "$TMP/src" >/dev/null
+    git clone -q --depth 1 --branch "$AUX_INS_REF" --filter=blob:none --sparse \
+        "$AUX_INS_REPO" "$TMP/src"
     ( cd "$TMP/src" && git sparse-checkout set "$SUBDIR" >/dev/null )
     SRC="$TMP/src/$SUBDIR"
     COMMIT=$(cd "$TMP/src" && git rev-parse --short HEAD)
@@ -166,7 +166,7 @@ missing=0
 check_model() {
     local file="$1" url="$2"
     if [ -f "$MODELS_ABS/$file" ]; then
-        note "found    : $file ($(du -h "$MODELS_ABS/$file" | cut -f1))"
+        note "found    : $file ($(du -hL "$MODELS_ABS/$file" 2>/dev/null | cut -f1))"
     else
         note "missing  : $file"
         echo "             curl -L --fail -o \"$MODELS_ABS/$file\" \\"
