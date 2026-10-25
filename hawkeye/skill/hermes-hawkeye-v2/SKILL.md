@@ -179,6 +179,12 @@ the SIGKILL escalation it re-checks every target and **exits 1 with
 as unresolved work, never as a log line to move past; a shell waiting on a foreground
 child defers SIGTERM, which is exactly why the escalation and the re-check exist.
 
+A stop is also a *silent* finish. `cmd_stop` writes `finished`/`finish_reason=stopped` from a
+separate process, and the phase re-reads `state.json` on every poll, so it exits without
+starting another attempt and without emitting a report: the wake a stop is meant to prevent
+stays unspent, and the verdict stays `stopped` instead of being rewritten as `gaveup`. If a
+stop returns 0 and the run later reports `attempts_exhausted`, that is this contract broken.
+
 Install the fallback timer (every 2 minutes, independent of the agent):
 
 ```bash

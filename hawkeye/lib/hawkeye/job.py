@@ -76,3 +76,11 @@ def exit_code(rd: Path) -> int | None:
         return int(raw)
     except ValueError:
         return None
+
+
+def command_pid(rd: Path) -> int | None:
+    """Pid the wrapper recorded for the command (own session), or None."""
+    try:
+        return int((rd / store.JOB_PID).read_text().strip())
+    except (OSError, ValueError):
+        return None

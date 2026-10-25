@@ -231,18 +231,21 @@ def cmd_events(args: argparse.Namespace, cfg: dict) -> int:
 def cmd_stop(args: argparse.Namespace, cfg: dict) -> int:
     rd = store.run_dir(args.run)
     state = store.read_json(rd / store.STATE, {}) or {}
+    # Mark the run finished BEFORE killing anything: the phase re-reads state.json every tick
+    # and refuses to write over a finished run, so announcing the stop first closes the window
+    # where our kill lands and the loop answers it with a fresh attempt (#7). Patching keeps
+    # whatever the phase recorded since we read `state` above.
+    store.update_json(rd / store.STATE, {"finished": True, "finish_reason": "stopped",
+                                         "finished_at": time.time()})
     # Two different processes matter here: state["job_pid"] is the `hk job` wrapper the phase
     # spawned, while job.pid is the *command* the wrapper started with start_new_session=True —
-    # i.e. a process group of its own. Killing only the wrapper's group leaves the real work
+    # i.e. a process group of its own. Killing only the wrapper group leaves the real work
     # running with nobody supervising it (measured: `hk stop` left the job command alive).
     targets: list[tuple[int, int | None]] = []
     pid = state.get("job_pid")
     if pid:
         targets.append((int(pid), state.get("job_pid_ticks")))
-    try:
-        cmd_pid = int((rd / store.JOB_PID).read_text().strip())
-    except (OSError, ValueError):
-        cmd_pid = None
+    cmd_pid = job_mod.command_pid(rd)
     if cmd_pid and cmd_pid != pid:
         targets.append((cmd_pid, None))
     for target, ticks in targets:
@@ -270,9 +273,6 @@ def cmd_stop(args: argparse.Namespace, cfg: dict) -> int:
             time.sleep(0.05)
         else:
             survivors.append(target)
-    store.write_json(rd / store.STATE, {**state, "finished": True,
-                                        "finish_reason": "stopped",
-                                        "finished_at": time.time()})
     store.append_event(rd, "run_stopped", survivors=survivors or None)
     print("stopped %s" % args.run)
     if survivors:

@@ -44,6 +44,10 @@ _MAX_MILESTONES_IN_DIGEST = 4
 _LINE_CLIP = 90
 
 
+class _Stopped(Exception):
+    """Another process finished this run (``hk stop``): unwind without touching state.json."""
+
+
 class Phase:
     def __init__(self, cfg: dict, run_id: str):
         self.cfg = cfg
@@ -72,17 +76,25 @@ class Phase:
                 if not (self.rd / store.META).is_file():
                     print("HK-ERROR run directory disappeared (no meta.json): %s" % self.rd)
                     return 2
-                self._beat()
-                terminal, reason = self._advance()
-                if terminal:
-                    self._finish(reason)
-                    self._report(reason)
-                    return 0
-                if self._report_due(reason):
-                    if self._report_allowed():
+                try:
+                    # Read durable state before acting, not only at run() entry: hk stop
+                    # finishes the run from another process, and a tick that starts an
+                    # attempt after that stop is the work coming back (#7).
+                    if self._stop_requested():
+                        return self._exit_stopped()
+                    self._beat()
+                    terminal, reason = self._advance()
+                    if terminal:
+                        self._finish(reason)
                         self._report(reason)
                         return 0
-                    self._defer(reason)
+                    if self._report_due(reason):
+                        if self._report_allowed():
+                            self._report(reason)
+                            return 0
+                        self._defer(reason)
+                except _Stopped:
+                    return self._exit_stopped()
                 time.sleep(float(self.cfg["poll_seconds"]))
 
     def _beat(self) -> None:
@@ -92,8 +104,52 @@ class Phase:
             pass
 
     def _set(self, **patch: Any) -> None:
+        # Refuse to write our in-memory copy over a verdict another process wrote: this is how
+        # finish_reason=stopped used to become gaveup, because the loop never re-read
+        # state.json after Phase.__init__ (#7).
+        if not self.state.get("finished") and self._stop_requested():
+            raise _Stopped()
         self.state.update(patch)
         store.write_json(self.rd / store.STATE, self.state)
+
+    def _stop_requested(self) -> bool:
+        """True when another process finished this run, with state reloaded from disk.
+
+        The phase is the only writer of its own copy, so it also has to be the reader of
+        durable state written by anybody else: without this, a stop landed, the loop kept its
+        stale copy, started attempt 2 and wrote the copy back (#7).
+        """
+        disk = store.read_json(self.rd / store.STATE, {}) or {}
+        if isinstance(disk, dict) and disk.get("finished"):
+            self.state = disk
+            return True
+        return False
+
+    def _exit_stopped(self) -> int:
+        """Leave a stopped run alone and exit without a report.
+
+        No wake is the point of ``stop``: a report here would deliver the run the operator
+        just cancelled. Nothing durable is written either -- ``cmd_stop`` owns state.json
+        while it is stopping.
+        """
+        self._kill_own_child("stop")
+        store.append_event(self.rd, "phase_exit", reason="stopped")
+        return 0
+
+    def _kill_own_child(self, why: str) -> None:
+        """Kill the attempt this phase spawned, if anything of it is still alive.
+
+        The wrapper lives in its own session and the command in a second one, so a pid is the
+        only handle that reaches both once the phase stops supervising them.
+        """
+        wrapper = self._child.pid if self._child is not None else None
+        self._child = None
+        if wrapper and store.pid_alive(wrapper):
+            _signal_group(wrapper, signal.SIGTERM)
+        command = job_mod.command_pid(self.rd)
+        if command and store.pid_alive(command):
+            _signal_group(command, signal.SIGTERM)
+            store.append_event(self.rd, "job_killed", reason=why, pid=command)
 
     # ── advance: dispatch ─────────────────────────────────────────────────
     def _advance(self) -> tuple[bool, str]:
@@ -146,15 +202,21 @@ class Phase:
         proc = subprocess.Popen(entry, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                 stdin=subprocess.DEVNULL, start_new_session=True)
         self._child = proc
-        ticks = None
-        for _ in range(50):
-            ticks = store.proc_start_ticks(proc.pid)
-            if ticks is not None:
-                break
-            time.sleep(0.02)
-        self._set(job_pid=proc.pid, job_pid_ticks=ticks, attempt=attempt,
-                  attempt_started=time.time(), log_offset=0,
-                  next_attempt_at=0, last_failure=None)
+        try:
+            ticks = None
+            for _ in range(50):
+                ticks = store.proc_start_ticks(proc.pid)
+                if ticks is not None:
+                    break
+                time.sleep(0.02)
+            self._set(job_pid=proc.pid, job_pid_ticks=ticks, attempt=attempt,
+                      attempt_started=time.time(), log_offset=0,
+                      next_attempt_at=0, last_failure=None)
+        except _Stopped:
+            # The stop landed between the tick check and the spawn. This wrapper is ours and
+            # nothing else knows its pid, so kill it here or it becomes invisible work.
+            self._kill_own_child("stopped")
+            raise
         store.append_event(self.rd, "attempt_start", attempt=attempt, pid=proc.pid)
 
     def _fail(self, code: int, why: str) -> tuple[bool, str]:

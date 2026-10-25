@@ -129,7 +129,7 @@ After being woken: `kanban_show` to read the output → judge against the card's
 | `hk status --all [--json]` | Overview: state / attempts / reports / supervisor age / lease age |
 | `hk doctor [--fix] [--json]` | Fallback sweep; `--fix` restarts dead phases; exit code 1 when an incident exists |
 | `hk events --run X [--limit N]` | Event stream |
-| `hk stop --run X` | Stop the job and mark it finished |
+| `hk stop --run X` | Stop the run: kill the wrapper and the command, mark it `stopped` (no report, phase exits within one poll) |
 | `hk gc --days 7 [--dry-run] [--force]` | Clean up expired finished runs; runs with incidents are kept by default, `--force` deletes them |
 | `hk gate-check [--json]` | Per-profile completion-gate coverage; exit code 1 when any profile is ungated |
 | `hk phase --run X` | (internal) Run one supervisor phase; doctor uses it to restart |

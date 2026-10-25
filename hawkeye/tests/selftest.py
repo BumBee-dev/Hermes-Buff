@@ -681,6 +681,51 @@ def test_kernel_branch_resolves_board_paths() -> None:
           lines[2] == str(home / "kanban.db"), lines[2])
 
 
+
+def test_stop_stops_the_phase() -> None:
+    """``hk stop`` must end the run, not just label it: no restart, no rewake, no verdict rewrite.
+
+    Reported as #7, reproduced on a clean tree. ``cmd_stop`` writes finished/finish_reason into
+    state.json from a different process, while the phase loop holds the copy it read in
+    ``Phase.__init__``. The loop therefore started attempt 2 one second after ``run_stopped`` and
+    its ``_set()`` wrote the stale copy back -- the stop became ``gaveup`` plus a report, i.e.
+    exactly the wake it was meant to prevent.
+    """
+    conf = cfg("stopstop", attempts=2, attempt_timeout_seconds=1.5, backoff_seconds=[0.1],
+               poll_seconds=0.2)
+    rid = "stop-2"
+    # The command records its own pid: while this test is red, attempt 2 survives the stop in a
+    # session of its own (the bug), and job.pid is cleared with the failed attempt.
+    marker = BASE / "stop2-cmd.pid"
+    env = {**ENV, "HAWKEYE_V2_CONFIG": str(conf)}
+    phase = subprocess.Popen([sys.executable, str(HK), "run", "--id", rid, "--",
+                              "/bin/bash", "-c", "echo $$ > %s; sleep 121" % marker],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
+    started = wait_for(lambda: (read(rid, "state.json") or {}).get("job_pid"), 10)
+    check("stop2: the job is running before the stop", bool(started))
+    hk(["stop", "--run", rid], conf)
+    # Two full attempt windows: the regression showed up one second after the stop as
+    # attempt_start, and paid off as a report one attempt later.
+    ended = wait_for(lambda: phase.poll() is not None, 4.0)
+    if phase.poll() is None:
+        phase.kill()
+    phase.wait(timeout=5)
+    check("stop2: the phase exits on its own after the stop", ended, "still polling")
+    kinds = [e["kind"] for e in events(rid)]
+    after = kinds[kinds.index("run_stopped") + 1:] if "run_stopped" in kinds else kinds
+    check("stop2: nothing starts again after the stop", "attempt_start" not in after, str(after))
+    check("stop2: no report is emitted after the stop", "report" not in after, str(after))
+    state = read(rid, "state.json") or {}
+    check("stop2: finish_reason stays stopped", state.get("finish_reason") == "stopped", str(state))
+    check("stop2: the stop is not recorded as a failed attempt",
+          int(state.get("attempts_done") or 0) == 0, str(state.get("attempts_done")))
+    check("stop2: a stopped run leaves no result.json", not (RUNS / rid / "result.json").is_file())
+    try:
+        os.killpg(os.getpgid(int(marker.read_text().strip())), signal.SIGKILL)
+    except (OSError, ValueError):
+        pass
+
+
 def main() -> int:
     if not HK.is_file():
         print("cannot find %s" % HK)
@@ -692,7 +737,7 @@ def main() -> int:
                  test_agent_unreachable,
                  test_agent_responsive, test_phase_death_recovery,
                  test_milestone_and_wake_discipline, test_phase_exits_when_the_run_disappears,
-                 test_stop_kills_the_job_command,
+                 test_stop_kills_the_job_command, test_stop_stops_the_phase,
                  test_kanban_watcher_reads_default_board,
                  test_named_board_is_not_the_default_board,
                  test_gate_check_reports_ungated_profiles,
