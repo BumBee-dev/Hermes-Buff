@@ -74,6 +74,26 @@ def run_dir(run_id: str, base: str | None = None) -> Path:
     return run_root(base) / run_id
 
 
+@contextlib.contextmanager
+def file_lock(path: Path):
+    """Serialise read-modify-write cycles on one JSON document across processes.
+
+    Two processes legitimately write ``state.json``: the phase (progress) and ``hk stop`` (a
+    verdict). "Has somebody finished this run" and the write that follows must be one step, or a
+    stop landing between them is overwritten by the stale copy -- that is how a stopped run used
+    to restart, fail, and report (#7's family).
+    """
+    lock_path = path.with_name(path.name + ".lock")
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        with contextlib.suppress(OSError):
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
 def prunable_runs(root: Path, days: float, *, keep_incidents: bool = True) -> list[Path]:
     """Finished runs older than *days* that may be deleted.
 
@@ -125,11 +145,13 @@ def read_json(path: Path, default: Any = None) -> Any:
 
 
 def update_json(path: Path, patch: dict) -> dict:
-    data = read_json(path, {}) or {}
-    with_data = data if isinstance(data, dict) else {}
-    with_data.update(patch)
-    write_json(path, with_data)
-    return with_data
+    """Merge *patch* into an existing JSON document, atomically against other writers."""
+    with file_lock(path):
+        data = read_json(path, {}) or {}
+        merged = data if isinstance(data, dict) else {}
+        merged.update(patch)
+        write_json(path, merged)
+        return merged
 
 
 def append_event(rd: Path, name: str, **detail: Any) -> dict:

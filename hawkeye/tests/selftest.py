@@ -800,6 +800,49 @@ def test_report_creates_a_child_session() -> None:
           bool(rows) and rows[0][2] == "child report", str(rows[:1]))
 
 
+def test_state_writes_cannot_resurrect_a_finished_run() -> None:
+    """Progress writes and the stop verdict must not interleave into a resurrected run.
+
+    The phase and `hk stop` are different processes writing the same document. Without one lock
+    around "may I write?" plus the write, a stop landing in that gap is overwritten by a stale
+    copy: the run comes back, hits its timeout, and reports -- the wake the operator cancelled
+    (#7). Hammering both writers is what makes the window big enough to see.
+    """
+    import importlib
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
+    store = importlib.import_module("hawkeye.store")
+
+    rd = BASE / "state-race"
+    rd.mkdir()
+    (rd / "meta.json").write_text(json.dumps({"kind": "exec"}))
+    store.write_json(rd / "state.json", {"finished": False, "attempts_done": 0})
+
+    writer = (
+        "import sys, time\n"
+        "sys.path.insert(0, %r)\n"
+        "from hawkeye import store\n"
+        "rd = __import__('pathlib').Path(%r)\n"
+        "end = time.time() + 1.2\n"
+        "n = 0\n"
+        "while time.time() < end:\n"
+        "    n += 1\n"
+        "    store.update_state(rd, {'attempts_done': n})\n"
+        "print(n)\n" % (str(Path(__file__).resolve().parents[1] / "lib"), str(rd))
+    )
+    proc = subprocess.Popen([sys.executable, "-c", writer], stdout=subprocess.PIPE, text=True)
+    time.sleep(0.4)
+    store.update_json(rd / "state.json", {"finished": True, "finish_reason": "stopped"})
+    proc.communicate(timeout=30)
+
+    final = store.read_json(rd / "state.json", {}) or {}
+    check("state race: the stop verdict survives concurrent progress writes",
+          final.get("finished") is True and final.get("finish_reason") == "stopped", str(final))
+    store.update_json(rd / "state.json", {"attempts_done": 99})
+    after = store.read_json(rd / "state.json", {}) or {}
+    check("state race: a write after the verdict keeps the verdict",
+          after.get("finished") is True and after.get("finish_reason") == "stopped", str(after))
+
+
 def test_kernel_branch_resolves_board_paths() -> None:
     """With a real checkout, board paths must come from ``kanban_db_path()``.
 
@@ -975,6 +1018,7 @@ def main() -> int:
                  test_kanban_watcher_reads_default_board,
                  test_named_board_is_not_the_default_board,
                  test_gate_check_reports_ungated_profiles,
+                 test_state_writes_cannot_resurrect_a_finished_run,
                  test_report_creates_a_child_session,
                  test_kernel_branch_resolves_board_paths,
                  test_crash_loop_is_bounded, test_gc_keeps_incidents, test_status_all):
