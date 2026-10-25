@@ -185,6 +185,19 @@ starting another attempt and without emitting a report: the wake a stop is meant
 stays unspent, and the verdict stays `stopped` instead of being rewritten as `gaveup`. If a
 stop returns 0 and the run later reports `attempts_exhausted`, that is this contract broken.
 
+Two things a stop deliberately leaves behind: `state.json` keeps `job_pid` and the run
+directory keeps `job.pid`, so a stopped run can still name what it stopped -- a "stopped"
+that cannot name its own command has the same unaccountable shape as the orphan reports
+this contract exists to prevent. There is no `job.exit` (`result.json` is absent too) because
+the command was killed by us, so any exit code would be invented; `attempts_done` stays unset
+(TRIES 0) for the same reason. The operator ended the run, the job did not fail.
+
+A stop is bounded by `poll_seconds`, not immediate: `hk stop` returns as soon as the verdict is
+on disk, and the phase only notices at its next tick -- with a 30 s poll the phase process can
+still be exiting 30 s after `hk stop` printed `stopped`. Anything that deletes the run root
+right after a stop returns has to wait one poll interval (or run `hk doctor --fix`) instead of
+racing a phase that is still exiting.
+
 Install the fallback timer (every 2 minutes, independent of the agent):
 
 ```bash
