@@ -1,0 +1,193 @@
+---
+name: hermes-hawkeye-v2
+description: Use when a task runs unattended for hours or via kanban.
+version: 1.0.0
+category: software-development
+author: eSun
+license: MIT
+metadata:
+  hermes:
+    tags: [long-running, unattended, kanban, self-healing]
+    related_skills: [hermes-agent]
+---
+
+# hermes-hawkeye-v2
+
+Project: `<REPO_DIR>` (bin/hk, standard library only, no build step).
+
+The shape is three pieces: a **standalone program** (`bin/hk` + `lib/hawkeye/`, pure
+Python >= 3.11), this **skill** (the agent-side procedure), and an optional
+**plugin** (`plugins/hermes-hawkeye-gate`, the completion gate; default mode is
+`block`, set `HAWKEYE_GATE_MODE=warn` to roll back to advisory).
+
+## Repository rules (apply every time you change this project)
+
+- The working tree is the repository; hawkeye is one subdirectory of a public MIT
+  repository that will hold other Hermes tools beside it.
+- **English only**: comments, docstrings, CLI output, test labels, README, config
+  comments — no other language anywhere, including punctuation width.
+- **No hardcoded paths**: no `/root/...`, no private IPs, no hostnames, no
+  usernames. Paths come from env (`HAWKEYE_*`, `HERMES_HOME`) or from the
+  placeholders `<HERMES_HOME>`, `<REPO_DIR>`, `<HERMES_SRC>`.
+- After a change: both self-test suites pass, commit, push, then **verify from the
+  remote** (clone or read the file back through the API) — a successful push is
+  not proof that the remote content is what you think it is.
+- General practice for publishing internal tools lives in the
+  `opensourcing-internal-tools` skill; this file keeps only what is specific to
+  hawkeye.
+
+## When to use
+
+- The task will outlive one conversation turn and must not die when a turn times
+  out or is interrupted.
+- The task is dispatched to subagents (kanban) and you have to supervise them and
+  report the outcome back into the originating session.
+- You need "the work keeps running even if I am gone, and no report is lost".
+
+## Three hard constraints (do not invent your own wake channel)
+
+| Fact | Consequence |
+|---|---|
+| `notify_on_complete` fires once per process exit, with no cap | Wake-ups ride **phase exit**, never `notify=[pattern]` |
+| `watch_patterns` has a 15 s cooldown per session, disables after 3 cooldown hits, 8 hits per lifetime | Never use it as a continuous channel; `max_wakes` defaults to 6 |
+| Every wake is a full agent turn (one turn costs roughly a full context window) | Merge and debounce reports; retry inside the phase instead of waking per failure |
+
+## Starting work
+
+```bash
+P=<REPO_DIR>
+
+# Long run (the job script prints "HK-MS <milestone>" lines itself)
+$P/bin/hk run --id <id> -- <cmd...>
+
+# Board supervision
+$P/bin/hk kanban --id <id> --board default
+```
+
+When starting it through the terminal tool, **all three flags are required**:
+`background=True, notify=True, persist_on_release=True`. `persist_on_release` is what
+keeps the job alive across `/new`, compaction, and the end of the session.
+
+## Contract when woken (do this in this order)
+
+1. `hk lease --run <id>` — skip it and the doctor files an incident after
+   `wake_grace_seconds`.
+2. Read `runs/<id>/report.md` (or `hk status --run <id>`); do not replay history.
+3. Reply with 1–2 lines of progress; merge several cards or milestones into one line.
+4. Expand only on a terminal state (artifacts, commands, leftovers, rollback point).
+5. Do not start another long run inside a wake turn — create a new run instead.
+
+## Delayed or proactive delivery into the source session
+
+To push a message into the current session **after** this turn ends (reminder,
+scheduled notice, self-check signal), do not reach for cron — use the same
+primitive:
+
+```bash
+# job script: stay quiet until this turn is over, then print the text as a milestone
+sleep 75; echo "HK-MS <text to show>"
+```
+
+Start it with `hk run --id <id> -- /bin/bash <script>` (same three flags). The job
+exits, the phase reports, the session wakes, and the wake turn quotes the milestone
+text back to the user. The `sleep` has to be longer than your estimate of the time
+left in the current turn.
+
+## Judgement and correction (dispatch scenarios)
+
+- Judge against the acceptance criteria written into the card body, never against
+  the subagent's self-assessment.
+- **First real dispatch: one card, default profile, whole chain.** Only after you
+  have seen the gate in `block` mode not misfire should you open several cards.
+- **First two real dispatches**: show the user which criteria (a)(b)(c) hit and
+  which were missing for each card. After that, stop pasting per-card detail.
+- Not acceptable: `kanban_block` with what is missing, then re-dispatch via a new
+  card / `reassign` / `set-model`, and report one line.
+- Acceptable: one line, move to the next batch.
+
+## Operations
+
+```bash
+$P/bin/hk status --all          # state / attempts / reports / supervisor age / lease age
+$P/bin/hk doctor --fix          # backstop: restart dead phases, file incidents (rc=1 = incident)
+$P/bin/hk events --run <id>     # event stream
+$P/bin/hk stop --run <id>       # stop
+$P/bin/hk gc --days 7           # drop old finished runs (runs with an incident are kept)
+```
+
+Install the fallback timer (every 2 minutes, independent of the agent):
+
+```bash
+./install.sh                    # renders the units for this host and enables the timer
+./install.sh --print-only       # show what it would write
+```
+
+`doctor` is an ordinary Python script: one idle sweep is about 55 ms, 19 MB RSS,
+no directory creation, no network, no model call — **0 tokens**. Tokens only come
+from "phase exits -> notify -> wake turn". No run means no phase, so no wake.
+journald records one line per sweep; silence it with `StandardOutput=null` if the
+noise bothers you.
+
+`runs/` only grows — run `hk gc --days 7` periodically (`--dry-run` to look first,
+`--force` to include runs that carry an incident).
+
+## Pitfalls
+
+- **The board DB path must come from the kernel's `kanban_db_path()`**: the default
+  board lives at `<HERMES_HOME>/kanban.db`, and concatenating
+  `boards/<slug>/kanban.db` writes zero events without any error (this is exactly
+  what killed v1).
+- Liveness cannot rely on `os.kill(pid, 0)`: an unreaped child is a zombie and
+  still "alive". Read the state field in `/proc/<pid>/stat` and treat `Z` as dead.
+- The supervisor must `poll()` its own child, otherwise a zombie leaves the phase
+  waiting on a job that already finished.
+- Never use `cursor == 0` as the "uninitialised" sentinel: on an empty board it is
+  0, so every sweep re-aligns and swallows the first inserted event. Use an
+  explicit `cursor_ready` flag.
+- Build the digest before committing the board batch, or the digest always reports
+  "0 new".
+- **Cap restarts**: a phase that keeps crashing, restarted without a limit, becomes
+  a permanent 2-minute no-op (no tokens, no progress). `doctor` caps it at
+  `max_restarts` (default 5) and then writes `incident.json` (`phase_crash_loop`)
+  so the exit code surfaces the problem.
+- **Never guess the DB path in the fallback**: when `hermes_cli` cannot be
+  imported, a named board must already exist or the resolver returns `None`;
+  guessing the default DB would judge a card against the wrong board's contract —
+  the same silent-failure family as the concatenated path.
+- The gate plugin takes effect on `enable`: `hermes plugins enable <name>
+  --no-allow-tool-override` hot-loads its hooks into the **running** gateway
+  (it prints `active in the running gateway now: hooks`), no restart needed.
+- But **replacing the files of an already-enabled plugin does not reload it** — the
+  gateway keeps running the old module. `disable` then `enable` to hot-load again;
+  the copy inside the WebUI process needs a WebUI restart.
+- Wake turns advance on their own (measured on the WebUI: no page refresh needed).
+- Use `OnCalendar=*:0/2` rather than `OnBootSec` + `OnUnitActiveSec`: after a manual
+  `systemctl --user start` of the service, the latter stops scheduling the next
+  elapse (`NEXT` shows empty), which makes troubleshooting blind.
+- Moving the project means updating three places or it half-works: the user unit's
+  `ExecStart` / `HAWKEYE_V2_CONFIG` (rerun `./install.sh`), the skill's paths, and
+  both self-test suites (`daemon-reload`, then `systemctl --user start` once to
+  confirm).
+
+## Self-tests
+
+```bash
+python3 tests/selftest.py         # real subprocesses, 37 checks
+python3 tests/gate_selftest.py    # synthetic board DBs, 29 checks
+```
+
+Both build their own minimal board DB through `tests/fixtures.py`; neither reads an
+absolute path, so a clone runs on any host. To exercise the kernel path branch,
+pass both env vars explicitly: `HAWKEYE_KERNEL_SRC=<Hermes source>` and
+`HAWKEYE_TEST_UV_DEPS=<HERMES_HOME>/cache/uv/archive-v0` (Hermes runs from a uv
+temporary environment, so without these `hermes_cli` fails to import, the code
+silently takes the fallback, and the kernel branch stays untested). Without them
+the related assertions are skipped rather than failed.
+
+After a major Hermes upgrade, run both suites first (about 20 s, read-only):
+a failure means the kernel semantics this depends on have changed.
+
+Reproducible evidence of v1's silent failures lives in `tests/legacy/`: two scripts
+using an A/B layout (`<home>/kanban.db` versus `boards/default/`) showing that the
+old version neither wrote events nor enforced criterion (c) on the default board.
+They only run when `HAWKEYE_LEGACY_PLUGIN` points at the old plugin directory.

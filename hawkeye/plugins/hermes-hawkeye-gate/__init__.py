@@ -1,6 +1,6 @@
 """hawkeye-v2 completion gate — vetoes a ``kanban_complete`` that declares done with no evidence.
 
-Three modes (``HAWKEYE_GATE_MODE``): ``off`` | ``warn`` (default) | ``block``.
+Three modes (``HAWKEYE_GATE_MODE``): ``off`` | ``warn`` | ``block`` (default).
 Three criteria; missing any one means insufficient evidence:
 
   (a) summary or result is non-empty;
@@ -222,6 +222,11 @@ def _log(board: str, rec: dict) -> None:
     db = _db_path(board)
     target = Path(override).expanduser() if override else (db.parent / LOG_NAME if db else None)
     if target is None:
+        return
+    # Only write beside a board that actually exists. The kernel returns a path for
+    # any slug it is handed, so creating the parent directory here is what used to
+    # leave empty ``boards/<slug>/`` directories behind after a bad board name.
+    if not override and (db is None or not db.is_file()):
         return
     line = json.dumps({"ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                        "event": "gate", "hook": "pre_tool_call",

@@ -223,6 +223,21 @@ def main() -> int:
           alt_log.is_file())
     os.environ.pop("HERMES_KANBAN_BOARD", None)
 
+    print("\n# a board that does not exist must not be created by the logger")
+    bogus = HOME / "kanban" / "boards" / "no-such-board"
+    shutil.rmtree(bogus, ignore_errors=True)
+    os.environ["HERMES_KANBAN_BOARD"] = "no-such-board"
+    os.environ["HAWKEYE_GATE_MODE"] = "block"
+    before = len(gate_log())
+    verdict = call(mod, "t_plain")
+    check("bogus board: still judged (a call with no evidence is blocked)",
+          isinstance(verdict, dict) and verdict.get("action") == "block", repr(verdict))
+    check("bogus board: no boards/<slug>/ directory is left on disk", not bogus.exists(),
+          str(bogus))
+    check("bogus board: no log line is invented for a board that does not exist",
+          len(gate_log()) == before, str(len(gate_log()) - before))
+    os.environ.pop("HERMES_KANBAN_BOARD", None)
+
     shutil.rmtree(BASE, ignore_errors=True) if not FAILURES else None
     print("\nresult: %s" % ("all passed" if not FAILURES else "%d failed %s" % (len(FAILURES), FAILURES)))
     if FAILURES:

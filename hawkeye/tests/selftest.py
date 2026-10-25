@@ -29,6 +29,10 @@ BASE = Path(tempfile.mkdtemp(prefix="hkv2-selftest-"))
 RUNS = BASE / "runs"
 ENV = {**os.environ, "HAWKEYE_V2_ROOT": str(RUNS)}
 FAILURES: list[str] = []
+# Shared by cfg() below and by the unreachable-agent test, which has to wait past
+# this window explicitly. Keeping one constant means a tuning change cannot leave
+# the test asserting against a grace value the product no longer uses.
+WAKE_GRACE = 0.3
 
 
 def _toml_value(value):
@@ -55,7 +59,7 @@ def cfg(name: str, **over):
         "milestone_flush_seconds": 0.3,
         "kanban_kinds": ["completed", "blocked"],
         "kanban_quiet_seconds": 1,
-        "wake_grace_seconds": 0.3,
+        "wake_grace_seconds": WAKE_GRACE,
         "sup_stale_seconds": 1,
         "max_wakes": 6,
         "fallback_command": "",
@@ -152,10 +156,24 @@ def test_stall_is_detected() -> None:
 
 # ── 3. agent stops renewing -> doctor raises an incident ─────────────────
 def test_agent_unreachable() -> None:
+    """A report that nobody acknowledges has to end in an incident.
+
+    The product fires only when two conditions hold at once: a report exists, and
+    the lease is older than ``wake_grace_seconds``. Neither is guaranteed by the
+    time ``hk run`` returns -- on a loaded host the doctor process can start
+    inside that window and legitimately see a fresh lease -- so this test waits
+    for both conditions explicitly. Relying on "doctor startup happens to be
+    slower than the grace window" made this the one flaky test in the suite
+    (measured: 2 of 3 runs failed), and what it flaked on is the only alarm that
+    tells you the agent is gone, i.e. the path most worth testing.
+    """
     conf = cfg("unreach")
     job = script("ok.sh", "#!/bin/bash\necho ok\n")
     rid = "unreach-1"
     hk(["run", "--id", rid, "--", "/bin/bash", str(job)], conf)
+    reported = wait_for(lambda: (read(rid, "state.json") or {}).get("reports"), 10)
+    check("unreach: the job reported before the lease went stale", bool(reported))
+    time.sleep(WAKE_GRACE + 0.4)        # deterministically past wake_grace_seconds
     proc = hk(["doctor", "--json"], conf, check=False)
     rows = json.loads(proc.stdout)
     row = [r for r in rows if r["run"] == rid][0]

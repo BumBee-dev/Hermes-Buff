@@ -140,10 +140,9 @@ After being woken: `kanban_show` to read the output → judge against the card's
 ## 7. Operations
 
 ```bash
-# Install the fallback timer (every 2 minutes)
-cp config/systemd/hawkeye-doctor.{service,timer} ~/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user enable --now hawkeye-doctor.timer
+# Install the fallback timer (every 2 minutes) and the agent skill, rendered for this host
+./install.sh --hermes-home "<HERMES_HOME>" --kernel-src "<HERMES_SRC>"
+./install.sh --print-only                  # inspect the rendered units without writing
 systemctl --user list-timers | grep hawkeye
 
 # Day to day
@@ -184,7 +183,9 @@ script that never goes through the agent or the model; the only thing that burns
 |---|---|
 | Phase exit → WebUI server-side wake turn | **Verified end to end** (2026-10-25 `drill-verify`: a 28-second task → phase exited at 14:52:49 → the source session received a wake, and the summary carried three milestones plus the `lease: hk lease` instruction) |
 | Wake-turn visibility | The wake turn appears on its own in the current WebUI build (observed 2026-10-25); no manual refresh needed |
-| `hk kanban` against named boards (non-default) | The path goes through the kernel function, so it is consistent in theory; **only tested against the default board** |
+| `hk kanban` against named boards (non-default) | The path goes through the kernel function, so it is consistent in theory; **only the default board has been exercised end to end**, a named board is covered by the gate's own tests but not by a live dispatch |
+| Wake channel from cron or a bare shell | **Not available, by design.** Waking depends on Hermes' `terminal(background, notify, persist_on_release)`. Started from cron, a systemd timer, or a plain shell there is no `notify_on_complete`, so you get `hk doctor` incidents and `fallback_command` alerts, but no wake turn. Use a Hermes-managed background process for the wake path |
+| Unreachable-agent incident (`agent_unreachable`) | **Verified deterministically** as of the current test suite: the test now waits for the report and for the lease to exceed `wake_grace_seconds` instead of relying on doctor startup being slow. The previous version flaked (2 of 3 runs) and the flake landed exactly on this path |
 | `fallback_command` external call | Implemented, empty by default; the reference host only had a WeChat bridge, so it was not configured or exercised |
 | Job output over 256KB per tick | A single tick reads at most 256KB of deltas; the rest is read on the next tick — nothing is lost, but it lags by one tick |
 
@@ -193,16 +194,20 @@ script that never goes through the agent or the model; the only thing that burns
 ## 10. Self-tests
 
 ```bash
-python tests/selftest.py         # real subprocesses, 34 assertions, ~20s (hk core)
-python tests/gate_selftest.py    # synthetic board database, 24 assertions (completion-gate plugin)
+python3 tests/selftest.py         # real subprocesses, 37 checks, ~25s (hk core)
+python3 tests/gate_selftest.py    # synthetic board database, 29 checks (completion-gate plugin)
 ```
+
+Both suites must be green. The unreachable-agent check is timing-sensitive on purpose — it waits for
+the report and for the lease to age past `wake_grace_seconds` rather than assuming process startup
+covers the window, because that assumption used to make it the one flaky test in the suite.
 
 Coverage: a failed retry reports only once / stall detection and process-group kill / no lease renewal raises an
 incident / no false alarm after a lease is renewed / **the job keeps running after the phase is SIGKILLed and
 doctor picks it up** / milestone merging and "no wake spam while nobody renews the lease" / **events on the
 default board database are readable and reported only once** / `status` aggregation. The gate plugin
 covers the three modes, the three evidence clauses, default versus named board lookup, worker board-number
-pinning, and a register smoke test.
+pinning, a register smoke test, and a bogus board name (no directory invented, no log line invented).
 
 > Any Python ≥ 3.11 works; to stay isolated from the system interpreter use your environment's
 > `<VENV_PYTHON> tests/selftest.py`.
@@ -247,7 +252,7 @@ hermes plugins list | grep hawkeye        # "enabled" means it is active (the ga
 | Component | Form | Where it runs |
 |---|---|---|
 | `bin/hk` + `lib/hawkeye/` | **Standalone program** (does no plugin work) | Any shell / background process |
-| `hermes-hawkeye-v2` | **skill** (my operating procedure) | Hermes skills directory |
+| `skill/hermes-hawkeye-v2/` | **skill** (my operating procedure, English) | `<HERMES_HOME>/skills/` |
 | `plugins/hermes-hawkeye-gate` | **plugin** (the only part that must run inside the Hermes process) | `<HERMES_HOME>/plugins/` |
 
 **Dependency list:**
@@ -269,21 +274,42 @@ the `api_server` Bearer key, Docker, and **no modification of the Hermes source*
 
 ```bash
 # 1) Copy the project (no long-running dependencies)
-rsync -a hermes-hawkeye-v2/ <newhost>:/path/hermes-hawkeye-v2/
+rsync -a hawkeye/ <newhost>:/path/hermes-tools/hawkeye/
 
 # 2) Smoke test (read-only, no side effects)
-cd /path/hermes-hawkeye-v2 && python3 tests/selftest.py && python3 tests/gate_selftest.py
+cd /path/hermes-tools/hawkeye && python3 tests/selftest.py && python3 tests/gate_selftest.py
 
 # 3) (Optional) install the completion-gate plugin
 cp -a plugins/hermes-hawkeye-gate "<HERMES_HOME>/plugins/"
 hermes plugins enable hermes-hawkeye-gate --no-allow-tool-override
 
-# 4) (Optional) install the fallback timer
-cp config/systemd/hawkeye-doctor.{service,timer} ~/.config/systemd/user/
-systemctl --user daemon-reload && systemctl --user enable --now hawkeye-doctor.timer
+# 4) (Optional) fallback timer + agent skill, rendered for THIS host
+./install.sh --hermes-home "<HERMES_HOME>" --kernel-src "<HERMES_SRC>" --config "<HERMES_HOME>/hawkeye-v2/hawkeye.toml"
+#    --print-only    print the rendered units, write nothing
+#    --no-enable     write the units but leave the timer disabled
+#    --skip-skill    units only
+#    --unit-dir DIR  write the units somewhere else (test before touching ~/.config)
+```
 
-# 5) Copy the skill (if that host does not have it)
-cp -a <skill-dir>/hermes-hawkeye-v2 "<HERMES_HOME>/skills/"
+No hand editing is needed anywhere: `install.sh` renders the four host-specific values
+(`HERMES_HOME`, `HAWKEYE_V2_CONFIG`, `HAWKEYE_KERNEL_SRC`, `ExecStart`) from the templates in
+`config/systemd/` and leaves everything else authoritative, creates the config file from the example
+if it is missing, and copies `skill/hermes-hawkeye-v2/` into the Hermes skills directory.
+
+**Tree:**
+
+```
+hawkeye/
+├── bin/hk                     entry point (python3, stdlib only)
+├── lib/hawkeye/               store, job, phase, doctor, kanban, config, cli
+├── skill/hermes-hawkeye-v2/   the agent-side procedure (English)
+├── plugins/hermes-hawkeye-gate/  optional completion gate
+├── config/
+│   ├── hawkeye.toml.example   every tunable, documented
+│   └── systemd/               unit templates (rendered by install.sh)
+├── install.sh                 renders units, installs the skill
+├── tests/                     two self-test suites + v1 legacy reproducers
+└── README.md
 ```
 
 Note: `runs/` is state, not code — **do not copy it across hosts** (it holds that host's pids and timestamps).

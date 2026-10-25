@@ -7,7 +7,8 @@ After=default.target
 
 [Service]
 Type=oneshot
-# EDIT THESE FOUR VALUES FOR YOUR HOST — the paths below are examples only.
+# The four host-specific values are rendered by install.sh into your copy of this
+# unit; the paths below are only the template defaults, kept readable on purpose.
 # 1) HERMES_HOME           -> your Hermes home directory
 # 2) HAWKEYE_V2_CONFIG     -> path to your hawkeye.toml (see config/hawkeye.toml.example)
 # 3) HAWKEYE_KERNEL_SRC    -> path to your Hermes kernel source checkout (board-scenario path resolution)
