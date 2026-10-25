@@ -196,6 +196,28 @@ script that never goes through the agent or the model; the only thing that burns
 
 ---
 
+### Watching the issue tracker (maintenance only)
+
+`config/scripts/issue-watch.py` polls a repository's open issues and prints only what changed
+since the last look. It is not needed to run hawkeye — it exists so the maintenance loop can be
+driven by a scheduled agent turn that costs nothing while nothing happens.
+
+```bash
+GITHUB_TOKEN=… python3 config/scripts/issue-watch.py --repo OWNER/NAME --state /path/state.json
+#   exit 0  nothing new
+#   exit 10 new or changed items (printed: body + the comments not seen before)
+#   exit 2  error (no token, HTTP failure)
+#   --mark-seen   advance the state after the items have been handled
+#   --json        machine-readable
+```
+
+Output is deterministic on purpose: same state + same issues = same bytes, so a scheduler can
+diff it and skip the agent entirely when nothing changed (measured here: an idle tick with a
+monitor gate makes **zero** model calls). The only write is `--mark-seen` on the local state
+file; the tool never touches the repository and takes the token from the environment.
+
+---
+
 ## 8. Differences from v1 (the hermes-hawkeye 0.2.0 bundle)
 
 | Dimension | v1 | v2 |
@@ -374,6 +396,7 @@ hawkeye/
 ├── plugins/hermes-hawkeye-gate/  optional completion gate
 ├── config/
 │   ├── hawkeye.toml.example   every tunable, documented
+│   ├── scripts/               kernel-probe.py, issue-watch.py (maintenance/diagnostics)
 │   └── systemd/               unit templates (rendered by install.sh)
 ├── install.sh                 renders units, installs the skill
 ├── tests/                     two self-test suites + v1 legacy reproducers
