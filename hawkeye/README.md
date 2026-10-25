@@ -131,6 +131,7 @@ After being woken: `kanban_show` to read the output → judge against the card's
 | `hk events --run X [--limit N]` | Event stream |
 | `hk stop --run X` | Stop the job and mark it finished |
 | `hk gc --days 7 [--dry-run] [--force]` | Clean up expired finished runs; runs with incidents are kept by default, `--force` deletes them |
+| `hk gate-check [--json]` | Per-profile completion-gate coverage; exit code 1 when any profile is ungated |
 | `hk phase --run X` | (internal) Run one supervisor phase; doctor uses it to restart |
 
 `--config FILE` / `$HAWKEYE_V2_CONFIG` select the config; `--root DIR` / `$HAWKEYE_V2_ROOT` select the run root (default `<HERMES_HOME>/hawkeye-v2/runs`).
@@ -262,17 +263,42 @@ Not part of `hk`. It is the **one component that must exist as a plugin**, becau
 | Log | `hawkeye-gate.log` next to the board database, one JSON object per line |
 | Cost | About 0.2–7ms per call (measured on a local board database), no network, no LLM |
 
-Install:
+Install — **per profile, and that is not optional**:
 
 ```bash
-cp -a plugins/hermes-hawkeye-gate "<HERMES_HOME>/plugins/"
-HERMES_HOME="$HERMES_HOME" hermes plugins enable hermes-hawkeye-gate --no-allow-tool-override
-hermes plugins list | grep hawkeye        # "enabled" means it is active (the gateway hot-loads hooks)
+# covers the default profile AND every profile under <HERMES_HOME>/profiles/*/
+./install.sh --gate --all-profiles
+./install.sh --gate --profiles default,dev-coder        # or pick them explicitly
+
+./install.sh --print-only          # anything else installs no gate; check with:
+bin/hk gate-check                  # per-profile table, exit code 1 when a profile is ungated
 ```
+
+**Why per profile.** The plugin is discovered from `get_hermes_home()`, and "enabled" is
+`plugins.enabled` inside that profile's own `config.yaml`. Card workers do not run in your
+profile: the dispatcher starts each worker against its card's assignee profile, so a gate
+installed only in `default` sees the orchestrator's completions and **none** of the workers'
+— strict where it does not matter, silent where it does. Nothing warns you about it, which
+is why `hk gate-check` exists:
+
+```
+$ bin/hk gate-check
+profile     files     enabled    gates
+----------  --------  ---------  -----
+default     present   enabled    yes
+dev-coder   missing   absent     NO
+
+ungated: dev-coder
+fix    : ./install.sh --gate --all-profiles
+```
+
+`HAWKEYE_GATE_MODE` is read from the process environment, so it is inherited by the workers
+the gateway spawns; it is not stored per profile. If you need different modes per profile,
+that is not supported today — the coverage check is the honest control instead.
 
 > Updating an already-enabled plugin is not automatic: copying new files over it leaves the **old module
 > running in the gateway**. Re-run `hermes plugins enable <name>` (that hot-reloads hooks) or restart the gateway.
-> This bites exactly once, on the machine where you iterate on the plugin.
+> `install.sh --gate` does both (copy, then enable) per profile for exactly this reason.
 
 > The gate currently runs in `block`. If `hawkeye-gate.log` starts showing false positives, roll back with `HAWKEYE_GATE_MODE=warn` — no code change, no redeploy.
 > The cost of `block` is that **a false positive pins the card**.
@@ -299,7 +325,7 @@ hermes plugins list | grep hawkeye        # "enabled" means it is active (the ga
 | `hermes_cli.kanban_db` (kernel source path) | Required for the board scenario | Taken from `HAWKEYE_KERNEL_SRC` (set it to `<HERMES_SRC>`), imported the way Hermes imports it (via `hermes_bootstrap`, so the environment's dependencies are on `sys.path`); if it still cannot be imported, fallback path resolution is used |
 | Hermes kanban (including the in-gateway dispatcher) | Required for the board scenario | `kanban.dispatch_in_gateway` defaults to true |
 | systemd --user | Optional | Only to run `hk doctor --fix` every 2 minutes |
-| Hermes plugin system + `pre_tool_call` | Optional | Only the completion gate needs it |
+| Hermes plugin system + `pre_tool_call` | Optional | Only the completion gate needs it — and it must be installed and enabled **in every profile whose workers call `kanban_complete`** (see §11); `hk gate-check` reports the gaps |
 
 **Explicitly not needed** (the biggest difference from v1): cron, a gateway messaging platform (WeChat/Telegram),
 the `api_server` Bearer key, Docker, and **no modification of the Hermes source**.
@@ -313,16 +339,16 @@ rsync -a hawkeye/ <newhost>:/path/hermes-tools/hawkeye/
 # 2) Smoke test (read-only, no side effects)
 cd /path/hermes-tools/hawkeye && python3 tests/selftest.py && python3 tests/gate_selftest.py
 
-# 3) (Optional) install the completion-gate plugin
-cp -a plugins/hermes-hawkeye-gate "<HERMES_HOME>/plugins/"
-hermes plugins enable hermes-hawkeye-gate --no-allow-tool-override
-
-# 4) (Optional) fallback timer + agent skill, rendered for THIS host
-./install.sh --hermes-home "<HERMES_HOME>" --kernel-src "<HERMES_SRC>" --config "<HERMES_HOME>/hawkeye-v2/hawkeye.toml"
+# 3) (Optional) completion gate in EVERY profile + fallback timer + agent skill, for THIS host
+./install.sh --hermes-home "<HERMES_HOME>" --kernel-src "<HERMES_SRC>" --gate --all-profiles
 #    --print-only    print the rendered units, write nothing
 #    --no-enable     write the units but leave the timer disabled
-#    --skip-skill    units only
+#    --skip-skill    units (+ gate) only
+#    --profiles a,b  gate only these profiles (default with --gate: all of them)
 #    --unit-dir DIR  write the units somewhere else (test before touching ~/.config)
+
+# 3b) after any install or upgrade: is every worker profile actually gated?
+bin/hk gate-check
 ```
 
 No hand editing is needed anywhere: `install.sh` renders the four host-specific values

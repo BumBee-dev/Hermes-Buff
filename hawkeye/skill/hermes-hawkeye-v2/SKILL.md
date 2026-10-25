@@ -120,6 +120,10 @@ one model, treat the first two as mandatory.
 
 ## Judgement and correction (dispatch scenarios)
 
+- **Run `hk gate-check` before the first dispatch.** The gate plugin is loaded per profile,
+  so an install that only touched `default` blocks the orchestrator's own completions and
+  lets every worker through. Exit code 1 names the ungated profiles; `install.sh --gate
+  --all-profiles` fixes them all.
 - Judge against the acceptance criteria written into the card body, never against
   the subagent's self-assessment.
 - **First real dispatch: one card, default profile, whole chain.** Only after you

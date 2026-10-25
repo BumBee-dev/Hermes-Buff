@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 
 from . import config as cfg_mod
-from . import doctor, job as job_mod, phase, store
+from . import doctor, gatecheck, job as job_mod, phase, store
 
 
 def _err(msg: str, code: int = 2) -> int:
@@ -165,6 +165,18 @@ def cmd_doctor(args: argparse.Namespace, cfg: dict) -> int:
     return 1 if any(row["incident"] for row in rows) else 0
 
 
+def cmd_gate_check(args: argparse.Namespace, cfg: dict) -> int:
+    """Report gate coverage per profile — the gate plugin loads per profile, not per host."""
+    rows = gatecheck.report()
+    missing = gatecheck.gaps(rows)
+    if args.json:
+        print(json.dumps({"rows": rows, "ungated": [r["profile"] for r in missing]},
+                         ensure_ascii=False, indent=2))
+    else:
+        sys.stdout.write(gatecheck.render(rows))
+    return 1 if missing else 0
+
+
 def cmd_events(args: argparse.Namespace, cfg: dict) -> int:
     rd = store.run_dir(args.run)
     for rec in store.read_events(rd, limit=args.limit):
@@ -271,6 +283,9 @@ def build_parser() -> argparse.ArgumentParser:
     doc.add_argument("--fix", action="store_true")
     doc.add_argument("--json", action="store_true")
 
+    gchk = sub.add_parser("gate-check", help="report which profiles have the completion gate installed and enabled")
+    gchk.add_argument("--json", action="store_true")
+
     ev = sub.add_parser("events", help="print the event stream")
     ev.add_argument("--run", required=True)
     ev.add_argument("--limit", type=int, default=50)
@@ -294,5 +309,6 @@ def main(argv: list[str] | None = None) -> int:
         "run": cmd_run, "kanban": cmd_kanban, "phase": cmd_phase, "job": cmd_job,
         "status": cmd_status, "lease": cmd_lease, "doctor": cmd_doctor,
         "events": cmd_events, "stop": cmd_stop, "gc": cmd_gc,
+        "gate-check": cmd_gate_check,
     }
     return handlers[args.cmd](args, cfg)

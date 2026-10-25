@@ -9,11 +9,17 @@
 # directory.
 #
 # Usage:
-#   ./install.sh                          # render units, enable the timer
+#   ./install.sh                          # render units, enable the timer, install the skill
+#   ./install.sh --gate                   # ... and install the completion gate in EVERY profile
+#   ./install.sh --gate --profiles default,dev-coder
 #   ./install.sh --no-enable              # render only, print the enable command
 #   ./install.sh --print-only             # show the rendered units, write nothing
 #   ./install.sh --skip-skill             # units only
 #   ./install.sh --help
+#
+# The completion gate loads per profile, so `--gate` alone covers every profile found
+# under <HERMES_HOME>/profiles/*/ — that is the point: a single install in the default
+# profile leaves every worker in a worker profile ungated.
 #
 # Overrides (env or flag):
 #   HERMES_HOME        --hermes-home DIR   Hermes home (default: $HOME/.hermes)
@@ -38,14 +44,46 @@ HAWKEYE_PYTHON="${HAWKEYE_PYTHON:-}"
 SKILL_DEST=""
 DO_ENABLE=1
 DO_SKILL=1
+DO_GATE=0
+GATE_PROFILES=""          # empty with --gate means: every profile found
 PRINT_ONLY=0
 
 note() { printf '  %s\n' "$*"; }
 step() { printf '\n== %s\n' "$*"; }
 die()  { printf 'install.sh: %s\n' "$*" >&2; exit 1; }
 
+# "name|home" lines: the root home IS the default profile.
+gate_profile_list() {
+    printf 'default|%s\n' "$HERMES_HOME"
+    if [ -d "$HERMES_HOME/profiles" ]; then
+        for d in "$HERMES_HOME"/profiles/*/; do
+            [ -f "${d}config.yaml" ] || continue
+            printf '%s|%s\n' "$(basename "$d")" "${d%/}"
+        done
+    fi
+}
+
+# Copy the plugin, then enable it *per profile*: "enabled" is per-profile config, and
+# replacing the files of an already-enabled plugin does not reload it, so the enable
+# call is also what hot-loads the new copy into the running gateway for that profile.
+install_gate_into() {
+    g_name="$1"; g_home="$2"
+    mkdir -p "$g_home/plugins"
+    rm -rf "$g_home/plugins/hermes-hawkeye-gate.tmp"
+    cp -a "$REPO_DIR/plugins/hermes-hawkeye-gate" "$g_home/plugins/hermes-hawkeye-gate.tmp"
+    rm -rf "$g_home/plugins/hermes-hawkeye-gate"
+    mv "$g_home/plugins/hermes-hawkeye-gate.tmp" "$g_home/plugins/hermes-hawkeye-gate"
+    if [ "$g_name" = "default" ]; then
+        HERMES_HOME="$g_home" hermes plugins enable hermes-hawkeye-gate \
+            --no-allow-tool-override >/dev/null 2>&1
+    else
+        HERMES_HOME="$HERMES_HOME" hermes -p "$g_name" plugins enable hermes-hawkeye-gate \
+            --no-allow-tool-override >/dev/null 2>&1
+    fi
+}
+
 usage() {
-    sed -n '2,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '2,/^set -euo pipefail$/p' "${BASH_SOURCE[0]}" | sed '$d' | sed 's/^# \{0,1\}//'
 }
 
 while [ $# -gt 0 ]; do
@@ -56,6 +94,9 @@ while [ $# -gt 0 ]; do
         --python)       HAWKEYE_PYTHON="$2"; shift 2 ;;
         --unit-dir)     UNIT_DIR="$2"; shift 2 ;;
         --skill-dir)    SKILL_DEST="$2"; shift 2 ;;
+        --gate)         DO_GATE=1; shift ;;
+        --profiles)     GATE_PROFILES="$2"; DO_GATE=1; shift 2 ;;
+        --all-profiles) GATE_PROFILES=""; DO_GATE=1; shift ;;
         --no-enable)    DO_ENABLE=0; shift ;;
         --skip-skill)   DO_SKILL=0; shift ;;
         --print-only)   PRINT_ONLY=1; shift ;;
@@ -103,7 +144,7 @@ render_service() {
         }
 }
 
-step "1/4 preflight"
+step "1/5 preflight"
 note "repo      : $REPO_DIR"
 note "hermes    : $HERMES_HOME"
 note "config    : $HAWKEYE_V2_CONFIG"
@@ -137,7 +178,7 @@ if [ "$PRINT_ONLY" = "1" ]; then
     exit 0
 fi
 
-step "2/4 config file"
+step "2/5 config file"
 if [ -f "$HAWKEYE_V2_CONFIG" ]; then
     note "exists, left untouched: $HAWKEYE_V2_CONFIG"
 else
@@ -146,7 +187,7 @@ else
     note "created from the example: $HAWKEYE_V2_CONFIG"
 fi
 
-step "3/4 systemd user units"
+step "3/5 systemd user units"
 mkdir -p "$UNIT_DIR"
 render_service > "$UNIT_DIR/hawkeye-doctor.service"
 cp "$UNIT_SRC/hawkeye-doctor.timer" "$UNIT_DIR/hawkeye-doctor.timer"
@@ -166,7 +207,7 @@ else
     note "systemctl not found: units written but not enabled"
 fi
 
-step "4/4 agent skill"
+step "4/5 agent skill"
 if [ "$DO_SKILL" = "0" ]; then
     note "skipped (--skip-skill)"
 elif [ -f "$REPO_DIR/skill/hermes-hawkeye-v2/SKILL.md" ]; then
@@ -177,6 +218,45 @@ else
     note "repository has no skill/ directory, nothing to install"
 fi
 
+step "5/5 completion gate"
+if [ "$DO_GATE" = "0" ]; then
+    note "skipped (--gate installs it, --profiles/--all-profiles picks where)"
+else
+    [ -d "$REPO_DIR/plugins/hermes-hawkeye-gate" ] || die "missing plugins/hermes-hawkeye-gate"
+    command -v hermes >/dev/null || die "hermes CLI not found; the gate is enabled per profile through it"
+    gate_list=$(mktemp)
+    if [ -n "$GATE_PROFILES" ]; then
+        : > "$gate_list"
+        IFS=',' read -r -a wanted_profiles <<< "$GATE_PROFILES"
+        for p_name in "${wanted_profiles[@]}"; do
+            p_name=$(printf '%s' "$p_name" | tr -d ' ')
+            [ -n "$p_name" ] || continue
+            if [ "$p_name" = "default" ]; then
+                printf 'default|%s\n' "$HERMES_HOME" >> "$gate_list"
+            elif [ -f "$HERMES_HOME/profiles/$p_name/config.yaml" ]; then
+                printf '%s|%s\n' "$p_name" "$HERMES_HOME/profiles/$p_name" >> "$gate_list"
+            else
+                die "no such profile: $p_name (expected $HERMES_HOME/profiles/$p_name)"
+            fi
+        done
+    else
+        gate_profile_list > "$gate_list"
+    fi
+    while IFS='|' read -r p_name p_home; do
+        [ -n "$p_name" ] || continue
+        if install_gate_into "$p_name" "$p_home"; then
+            printf '  %-14s installed + enabled\n' "$p_name"
+        else
+            printf '  %-14s files copied, ENABLE FAILED\n' "$p_name"
+        fi
+    done < "$gate_list"
+    rm -f "$gate_list"
+    note ""
+    note "coverage (this is the point of the step: one profile is not enough):"
+    HERMES_HOME="$HERMES_HOME" "$REPO_DIR/bin/hk" gate-check || \
+        note "  ^ ungated profiles above run workers with no gate at all"
+fi
+
 cat <<EOF
 
 Done. What is now in place:
@@ -184,9 +264,11 @@ Done. What is now in place:
   bin/hk                  runs in place, nothing installed
   doctor timer            every 2 minutes, restarts dead phases, files incidents
   skill                   the agent-side procedure (lease first, 1-2 line reports)
+  completion gate         $([ "$DO_GATE" = "1" ] && echo "installed per profile (see the coverage table above)" || echo "not installed (--gate)")
 
 Verify:
   $REPO_DIR/bin/hk status --all
+  $REPO_DIR/bin/hk gate-check          # per-profile gate coverage; exit 1 when a profile is ungated
   systemctl --user start hawkeye-doctor.service   # exit code 1 means "an incident exists"
 
 Remove:

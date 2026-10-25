@@ -400,6 +400,58 @@ def test_named_board_is_not_the_default_board() -> None:
     check("alt: the named board's card is reported", "alt probe" in text, (text or out)[-300:])
 
 
+def test_gate_check_reports_ungated_profiles() -> None:
+    """``hk gate-check`` must name the profiles that are not gated, and exit non-zero.
+
+    The gate plugin loads from a profile's own ``plugins/`` directory and "enabled" is
+    per-profile config, so one install leaves every other profile's workers ungated with
+    nothing reporting it. Fixture: ``default`` gated, ``dev-coder`` present but disabled,
+    ``dev-tester`` absent. A stub CLI answers for each profile, because the real answer
+    comes from ``hermes plugins list --json``.
+    """
+    home = fixtures.make_hermes_home(BASE / "gatehome")
+    for rel, plugin_yaml in (
+        ("plugins/hermes-hawkeye-gate", True),
+        ("profiles/dev-coder/plugins/hermes-hawkeye-gate", True),
+    ):
+        d = home / rel
+        d.mkdir(parents=True, exist_ok=True)
+        if plugin_yaml:
+            (d / "plugin.yaml").write_text("name: hermes-hawkeye-gate\n", encoding="utf-8")
+    for name in ("dev-coder", "dev-tester"):
+        (home / "profiles" / name).mkdir(parents=True, exist_ok=True)
+        (home / "profiles" / name / "config.yaml").write_text("plugins:\n  enabled: []\n",
+                                                              encoding="utf-8")
+
+    stub = BASE / "fake-hermes"
+    stub.write_text(
+        "#!/bin/sh\n"
+        "case \"$*\" in\n"
+        "  *'-p dev-coder'*) echo '[{\"name\":\"hermes-hawkeye-gate\",\"status\":\"disabled\"}]' ;;\n"
+        "  *'-p dev-tester'*) echo '[]' ;;\n"
+        "  *) echo '[{\"name\":\"hermes-hawkeye-gate\",\"status\":\"enabled\"}]' ;;\n"
+        "esac\n", encoding="utf-8")
+    stub.chmod(0o755)
+
+    env = {**ENV, "HERMES_HOME": str(home), "HAWKEYE_HERMES_BIN": str(stub)}
+    proc = subprocess.run([sys.executable, str(HK), "gate-check", "--json"],
+                          capture_output=True, text=True, timeout=120, env=env)
+    try:
+        payload = json.loads(proc.stdout)
+    except ValueError:
+        check("gate-check: emits JSON", False, (proc.stdout or proc.stderr)[-300:])
+        return
+    check("gate-check: names both ungated profiles",
+          payload.get("ungated") == ["dev-coder", "dev-tester"], json.dumps(payload.get("ungated")))
+    check("gate-check: exits non-zero when a profile is ungated", proc.returncode == 1,
+          str(proc.returncode))
+    rows = {r["profile"]: r for r in payload.get("rows", [])}
+    check("gate-check: the gated profile is reported as gated",
+          rows.get("default", {}).get("gated") is True, json.dumps(rows.get("default")))
+    check("gate-check: a profile without the files is 'absent'",
+          rows.get("dev-tester", {}).get("enabled") == "absent", json.dumps(rows.get("dev-tester")))
+
+
 def test_kernel_branch_resolves_board_paths() -> None:
     """With a real checkout, board paths must come from ``kanban_db_path()``.
 
@@ -455,6 +507,7 @@ def main() -> int:
                  test_agent_responsive, test_phase_death_recovery,
                  test_milestone_and_wake_discipline, test_kanban_watcher_reads_default_board,
                  test_named_board_is_not_the_default_board,
+                 test_gate_check_reports_ungated_profiles,
                  test_kernel_branch_resolves_board_paths,
                  test_crash_loop_is_bounded, test_gc_keeps_incidents, test_status_all):
         print("\n# %s" % test.__name__)

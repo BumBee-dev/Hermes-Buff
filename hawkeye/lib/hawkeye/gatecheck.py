@@ -1,0 +1,117 @@
+"""Per-profile coverage check for the completion gate.
+
+The gate plugin is loaded from a **profile's own** ``plugins/`` directory, and "enabled"
+lives in that profile's ``config.yaml`` (``plugins.enabled``). Installing it once into
+``<HERMES_HOME>/plugins`` therefore covers the ``default`` profile only — and on a host
+where cards are worked by other profiles (the normal kanban shape: orchestrator in
+``default``, workers in ``dev-coder`` / ``dev-tester`` / …) every worker stays ungated
+while the orchestrator's own completions get blocked. Nothing reports that, which is the
+same class of silent hole as the concatenated board path.
+
+This module answers one question: which profiles are actually gated.
+
+"Enabled" is read through the Hermes CLI (``plugins list --json``) per profile, because
+that is the authoritative answer — ``config.yaml`` is YAML and this project stays
+standard-library only. ``HAWKEYE_HERMES_BIN`` overrides which CLI to ask, which is also
+how the tests drive it.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import subprocess
+from pathlib import Path
+
+from . import store
+
+PLUGIN = "hermes-hawkeye-gate"
+
+
+def profiles() -> list[tuple[str, Path]]:
+    """``[(name, home)]`` — the root home is the ``default`` profile."""
+    root = store.hermes_home()
+    found: list[tuple[str, Path]] = [("default", root)]
+    pdir = root / "profiles"
+    if pdir.is_dir():
+        for entry in sorted(pdir.iterdir()):
+            if entry.is_dir() and (entry / "config.yaml").is_file():
+                found.append((entry.name, entry))
+    return found
+
+
+def plugin_dir(home: Path) -> Path:
+    return home / "plugins" / PLUGIN
+
+
+def _cli() -> str:
+    return (os.environ.get("HAWKEYE_HERMES_BIN") or "").strip() or (shutil.which("hermes") or "")
+
+
+def enabled_state(name: str) -> str:
+    """``enabled`` | ``disabled`` | ``absent`` | ``unknown`` (no CLI, or it errored)."""
+    exe = _cli()
+    if not exe:
+        return "unknown"
+    cmd = [exe] + ([] if name == "default" else ["-p", name]) + ["plugins", "list", "--json"]
+    try:
+        done = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    if done.returncode != 0:
+        return "unknown"
+    try:
+        rows = json.loads(done.stdout or "[]")
+    except ValueError:
+        return "unknown"
+    for row in rows if isinstance(rows, list) else []:
+        if isinstance(row, dict) and row.get("name") == PLUGIN:
+            return "enabled" if row.get("status") == "enabled" else "disabled"
+    return "absent"
+
+
+def report() -> list[dict]:
+    """One row per profile: where the plugin is, and whether that profile gates."""
+    rows = []
+    for name, home in profiles():
+        pdir = plugin_dir(home)
+        present = (pdir / "plugin.yaml").is_file() or (pdir / "plugin.json").is_file()
+        state = enabled_state(name) if present else "absent"
+        rows.append({
+            "profile": name,
+            "home": str(home),
+            "plugin_dir": str(pdir),
+            "present": present,
+            "enabled": state,
+            # A profile gates only when the files are there AND the profile enabled them.
+            "gated": bool(present and state == "enabled"),
+        })
+    return rows
+
+
+def gaps(rows: list[dict]) -> list[dict]:
+    return [r for r in rows if not r["gated"]]
+
+
+def render(rows: list[dict]) -> str:
+    if not rows:
+        return "no profiles found\n"
+    width = max(len(r["profile"]) for r in rows + [{"profile": "profile"}])
+    lines = ["%-*s  %-8s  %-9s  %s" % (width, "profile", "files", "enabled", "gates"),
+             "%s  %s  %s  %s" % ("-" * width, "-" * 8, "-" * 9, "-" * 5)]
+    for r in rows:
+        lines.append("%-*s  %-8s  %-9s  %s" % (
+            width, r["profile"], "present" if r["present"] else "missing",
+            r["enabled"], "yes" if r["gated"] else "NO"))
+    gap_rows = gaps(rows)
+    if gap_rows:
+        lines.append("")
+        lines.append("ungated: %s" % ", ".join(r["profile"] for r in gap_rows))
+        lines.append("fix    : ./install.sh --gate --all-profiles"
+                     "   (or: cp -a plugins/%s <profile-home>/plugins/ +"
+                     " hermes -p <profile> plugins enable %s)" % (PLUGIN, PLUGIN))
+    else:
+        lines.append("")
+        lines.append("every profile found is gated")
+    return "\n".join(lines) + "\n"
