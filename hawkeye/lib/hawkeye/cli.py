@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 
 from . import config as cfg_mod
-from . import doctor, gatecheck, job as job_mod, phase, store
+from . import doctor, gatecheck, job as job_mod, phase, report, store
 
 
 def _err(msg: str, code: int = 2) -> int:
@@ -193,6 +193,21 @@ def cmd_watch_file(args: argparse.Namespace, cfg: dict) -> int:
         except OSError:
             return None
 
+    rotate = float(getattr(args, "rotate_bytes", 0) or 0)
+    if rotate > 0:
+        try:
+            size = path.stat().st_size
+        except OSError:
+            size = 0
+        if size > rotate:
+            archive = path.parent / "archive"
+            archive.mkdir(parents=True, exist_ok=True)
+            stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+            target = archive / ("%s.%s.md" % (path.stem, stamp))
+            path.replace(target)
+            path.write_text("")             # a fresh signal file, same contract
+            sys.stderr.write("hk watch-file: rotated %d bytes to %s\n" % (size, target))
+
     baseline = digest()
     if baseline is None:
         sys.stderr.write("hk watch-file: %s does not exist yet; waiting for it to appear\n" % path)
@@ -200,7 +215,13 @@ def cmd_watch_file(args: argparse.Namespace, cfg: dict) -> int:
     while True:
         current = digest()
         if current != baseline:
-            print("%s%s: report changed (%s)" % (prefix, args.name, path))
+            child = None
+            if getattr(args, "report_into", None):
+                child = report.report_file(path, args.report_into,
+                                           getattr(args, "report_title", None) or args.name)
+            print("%s%s: report changed (%s)%s"
+                  % (prefix, args.name, path,
+                     "" if not child else " -> child session %s" % child))
             return 0
         if time.time() - started >= ttl:
             print("%s%s: no change for %ds; stopping" % (prefix, args.name, int(ttl)))
@@ -228,6 +249,27 @@ def cmd_paths(args: argparse.Namespace, cfg: dict) -> int:
     print("config : %s%s" % (conf, "" if conf.is_file() else "  (missing: defaults in use)"))
     print("runs   : %s" % runs)
     print("cache  : %s  <- everything hk writes lives here, safe to delete when idle" % cache)
+    return 0
+
+
+def cmd_report(args: argparse.Namespace, cfg: dict) -> int:
+    """Write a file's contents as a child session under ``--parent``.
+
+    The child is what the user sees in the WebUI: nested under the session that asked for the
+    work, collapsible, and attributable -- instead of another top-level window, or a file whose
+    existence has to be explained in prose.
+    """
+    path = Path(args.file)
+    if not path.is_file():
+        return _err("report file not found: %s" % path, 2)
+    try:
+        sid = report.write_child(args.parent, args.title, path.read_text(encoding="utf-8"),
+                                 source=args.source)
+    except Exception as exc:                      # noqa: BLE001 - a report is never worth a crash
+        sys.stderr.write("hk: could not write the child-session report (%s)\n" % exc)
+        return 1
+    print("%sreport: child session %s under %s"
+          % (str(cfg.get("milestone_prefix", "HK-MS ")), sid, args.parent))
     return 0
 
 
@@ -401,6 +443,11 @@ def build_parser() -> argparse.ArgumentParser:
         if name == "status":
             sp.add_argument("--json", action="store_true")
 
+    rp = sub.add_parser("report", help="write a report as a child session under an existing session")
+    rp.add_argument("--parent", required=True, help="session id the report belongs to")
+    rp.add_argument("--file", required=True, help="file whose contents become the report")
+    rp.add_argument("--title", default="hawkeye report", help="display name for the child session")
+    rp.add_argument("--source", default="hawkeye", help="session source label")
     pa = sub.add_parser("paths", help="where hk reads config and writes runtime directories")
     pa.add_argument("--json", action="store_true", help="machine-readable output")
     wf = sub.add_parser("watch-file",
@@ -409,6 +456,11 @@ def build_parser() -> argparse.ArgumentParser:
     wf.add_argument("--interval", type=float, default=10.0, help="seconds between checks")
     wf.add_argument("--ttl", type=float, default=43200.0, help="give up after this many seconds")
     wf.add_argument("--name", default="watch", help="label used in the milestone line")
+    wf.add_argument("--report-into", default=None,
+                    help="session id: on change, also write the file as a child session of it")
+    wf.add_argument("--report-title", default=None, help="display name for that child session")
+    wf.add_argument("--rotate-bytes", type=float, default=0,
+                    help="at startup, archive the file if it is larger than this many bytes")
     doc = sub.add_parser("doctor", help="safety sweep: restart dead supervision phases, raise incidents")
     doc.add_argument("--fix", action="store_true")
     doc.add_argument("--json", action="store_true")
@@ -439,6 +491,6 @@ def main(argv: list[str] | None = None) -> int:
         "run": cmd_run, "kanban": cmd_kanban, "phase": cmd_phase, "job": cmd_job,
         "status": cmd_status, "lease": cmd_lease, "doctor": cmd_doctor,
         "events": cmd_events, "stop": cmd_stop, "gc": cmd_gc,
-        "gate-check": cmd_gate_check, "watch-file": cmd_watch_file, "paths": cmd_paths,
+        "gate-check": cmd_gate_check, "watch-file": cmd_watch_file, "paths": cmd_paths, "report": cmd_report,
     }
     return handlers[args.cmd](args, cfg)

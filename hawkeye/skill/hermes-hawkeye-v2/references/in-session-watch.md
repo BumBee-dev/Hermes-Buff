@@ -105,3 +105,16 @@ its top level taxes every future cleanup decision. hawkeye writes only under
 keeps its config at `$XDG_CONFIG_HOME/hawkeye/hawkeye.toml`. `hk paths` prints all three paths, and
 two tests keep it that way — one asserts a run leaves nothing but `cache/` at the home root, the
 other asserts config resolution never *requires* a directory inside `HERMES_HOME`.
+
+## Reporting as a child session
+
+A wake turn is a nudge; the artefact still has to exist somewhere the user can browse. Hermes
+already nests child sessions (``parent_session_id``) under their parent -- that is how subagent
+work appears -- so `hk report --parent <sid> --file <f>` writes the report there through the
+kernel's `SessionDB`. `watch-file --report-into <sid>` does it automatically on the way out, which
+keeps one chain: producer writes the file, watcher notices, child session appears, session wakes.
+
+Keep the wake in place when you add the child session: the child is the record, the wake is the
+notification, and a user who is not looking at the sidebar still needs to be told. `--rotate-bytes`
+bounds the inbox by archiving it at startup -- never mid-watch, or rotation itself looks like the
+change that triggers a wake.

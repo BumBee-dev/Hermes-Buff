@@ -264,6 +264,42 @@ Two rules follow from this, and `tests/selftest.py` enforces them:
 * config must never be *required* to live inside `HERMES_HOME`
   (`test_config_resolution_prefers_xdg_and_keeps_legacy_working`).
 
+## 7c. Reporting into the session as a child session (optional third mode)
+
+The WebUI nests child sessions (``parent_session_id``) under their parent -- that is how subagent
+work appears. A background producer can use the same shape for its reports:
+
+```bash
+hk report --parent <session-id> --file <report.md> --title "hawkeye triage report"
+```
+
+It writes through the kernel's own ``SessionDB`` (the class the CLI and the WebUI use), never
+hand-written SQL, so the session row, its counters and its message store stay consistent with the
+release running on the host. The result is browsable and attributable: nested under the session
+that asked for the work, collapsible, and gone from the sidebar when the parent is.
+
+``watch-file`` can do it on the way out, which is the whole chain in one flag:
+
+```bash
+hk run --id inbox-watch -- /path/to/bin/hk watch-file \
+    --path "$HERMES_HOME/cache/hawkeye/inbox/report.md" \
+    --report-into <session-id> --report-title "hawkeye triage report" \
+    --rotate-bytes 204800 --interval 10 --ttl 43200 --name inbox
+```
+
+Three modes, and they compose rather than replace each other:
+
+| Mode | Where the result appears | Use when |
+|---|---|---|
+| wake only (`watch-file`, no ``--report-into``) | one turn in the originating session | you want a nudge, not an artefact |
+| wake + child session (`--report-into`) | a turn **and** a browsable child session | default: the work should outlive the message |
+| cron delivery | a session of its own | nobody is in the chat at all |
+
+``--rotate-bytes`` archives an oversized signal file into ``<dir>/archive/`` at startup and starts
+a fresh one, so a long-lived inbox cannot grow without bound. Rotation happens *before* the
+digest baseline is taken -- rotating mid-watch would otherwise look like a change and the watcher
+would wake itself.
+
 ## 8a. Two-process pattern: a producer that works, a watcher that wakes
 
 Some work must continue when nobody is in the chat — an issue triage loop, a nightly audit. A run

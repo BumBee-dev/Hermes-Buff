@@ -739,6 +739,67 @@ def test_gate_check_reports_ungated_profiles() -> None:
           rows.get("dev-tester", {}).get("enabled") == "absent", json.dumps(rows.get("dev-tester")))
 
 
+def test_report_creates_a_child_session() -> None:
+    """A report must land where the user looks, not only in a file.
+
+    The WebUI already renders child sessions (``parent_session_id``) nested under their parent --
+    that is how subagent work appears -- so hawkeye writes background reports there through the
+    kernel's own ``SessionDB``. Skips on a host without the checkout, like the other kernel test:
+    there is nothing to assert about a kernel that is not installed.
+    """
+    src = os.environ.get("HAWKEYE_KERNEL_SRC", "").strip()
+    if not src:
+        print("  SKIP report: HAWKEYE_KERNEL_SRC is not set")
+        return
+    home = BASE / "report-home"
+    home.mkdir()
+    env = {**ENV, "HAWKEYE_KERNEL_SRC": src, "HERMES_HOME": str(home),
+           "HAWKEYE_V2_CONFIG": str(cfg("report"))}
+
+    seed = (
+        "import sys\n"
+        "sys.path.insert(0, %r)\n"
+        "import hermes_bootstrap\n"
+        "from hermes_state import SessionDB\n"
+        "db = SessionDB()\n"
+        "db.create_session('parent-1', source='webui', display_name='parent')\n"
+        "db.append_message('parent-1', 'user', 'do the work')\n"
+        "db.close()\n"
+        "print('SEEDED')\n" % src
+    )
+    seeded = subprocess.run([sys.executable, "-c", seed], capture_output=True, text=True,
+                            env=env, timeout=180)
+    if "SEEDED" not in seeded.stdout:
+        tail = (seeded.stderr or "").strip().splitlines()[-1:] or ["no output"]
+        print("  SKIP report: cannot seed a session db (%s)" % tail[0])
+        return
+
+    body = BASE / "report-body.md"
+    body.write_text("# report\nall good\n")
+    proc = subprocess.run([sys.executable, str(HK), "report", "--parent", "parent-1",
+                           "--file", str(body), "--title", "child report"],
+                          capture_output=True, text=True, env=env, timeout=180)
+    check("report: hk report succeeds", proc.returncode == 0, (proc.stderr or "")[-200:])
+
+    reader = (
+        "import json, sqlite3\n"
+        "c = sqlite3.connect(%r)\n"
+        "rows = c.execute(\"select id, parent_session_id, display_name from sessions "
+        "where parent_session_id='parent-1'\").fetchall()\n"
+        "msgs = c.execute(\"select count(*) from messages where session_id in "
+        "(select id from sessions where parent_session_id='parent-1')\").fetchone()[0]\n"
+        "print(json.dumps({'rows': rows, 'msgs': msgs}))\n" % str(home / "state.db")
+    )
+    out = subprocess.run([sys.executable, "-c", reader], capture_output=True, text=True,
+                         timeout=60).stdout
+    info = json.loads(out or "{}")
+    rows = info.get("rows") or []
+    check("report: a child session is created under the parent", len(rows) == 1, str(info))
+    check("report: the child carries the report body", info.get("msgs") == 1, str(info))
+    check("report: the child is named after the title",
+          bool(rows) and rows[0][2] == "child report", str(rows[:1]))
+
+
 def test_kernel_branch_resolves_board_paths() -> None:
     """With a real checkout, board paths must come from ``kanban_db_path()``.
 
@@ -914,6 +975,7 @@ def main() -> int:
                  test_kanban_watcher_reads_default_board,
                  test_named_board_is_not_the_default_board,
                  test_gate_check_reports_ungated_profiles,
+                 test_report_creates_a_child_session,
                  test_kernel_branch_resolves_board_paths,
                  test_crash_loop_is_bounded, test_gc_keeps_incidents, test_status_all):
         print("\n# %s" % test.__name__)
