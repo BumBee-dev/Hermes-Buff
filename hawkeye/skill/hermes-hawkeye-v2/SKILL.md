@@ -157,9 +157,17 @@ one model, treat the first two as mandatory.
 $P/bin/hk status --all          # state / attempts / reports / supervisor age / lease age
 $P/bin/hk doctor --fix          # backstop: restart dead phases, file incidents (rc=1 = incident)
 $P/bin/hk events --run <id>     # event stream
-$P/bin/hk stop --run <id>       # stop
+$P/bin/hk stop --run <id>       # stop the run AND the command it started
 $P/bin/hk gc --days 7           # drop old finished runs (runs with an incident are kept)
 ```
+
+`hk stop` kills two process groups, not one: the `hk job` wrapper and the command it
+spawned with `start_new_session=True` (the command is its own group leader, so killing
+only the wrapper leaves an orphan that keeps working with nobody supervising it). After
+the SIGKILL escalation it re-checks every target and **exits 1 with
+`warning: still alive after stop: <pids>`** if anything survived. Treat a non-zero stop
+as unresolved work, never as a log line to move past; a shell waiting on a foreground
+child defers SIGTERM, which is exactly why the escalation and the re-check exist.
 
 Install the fallback timer (every 2 minutes, independent of the agent):
 
@@ -268,7 +276,7 @@ the loop silently:
 ## Self-tests
 
 ```bash
-python3 tests/selftest.py         # real subprocesses, 39 checks
+python3 tests/selftest.py         # real subprocesses; the printed `result:` line is the verdict
 python3 tests/gate_selftest.py    # synthetic board DBs, 29 checks
 ```
 
@@ -292,4 +300,6 @@ Release mechanics — proving a new test red against the old code before trustin
 sandbox-testing `install.sh` with a stub CLI, verifying a push through the API instead of
 `raw.githubusercontent`, and the per-claim shape of answering an inbound report — are in
 `references/testing-and-release.md`. The borrowed-kernel surface table (and what an upgrade
-can break) is in `references/kernel-surfaces.md`.
+can break) is in `references/kernel-surfaces.md`. Reporting into the conversation that started
+the work — TTL shape, wake latency, proving no new session window appeared, and the stop/pgrep
+pitfalls — is in `references/in-session-watch.md`.
