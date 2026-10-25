@@ -343,12 +343,14 @@ class Phase:
         milestones = (self.state.get("milestones") or [])[-_MAX_MILESTONES_IN_DIGEST:]
         if milestones:
             lines.append("milestones: " + " | ".join(_clip(m, _LINE_CLIP) for m in milestones))
-        tail = [ln for ln in store.tail(self.rd / store.WORK_LOG, 4096).splitlines()
-                if ln.strip() and not ln.startswith(str(self.cfg["milestone_prefix"]))]
-        if tail:
-            lines.append("recent output: " + " ⟂ ".join(_clip(ln, _LINE_CLIP)
-                                                   for ln in tail[-_MAX_DIGEST_TAIL_LINES:]))
+        # Only a failure needs the raw tail; on success it just repeats the
+        # milestone and lengthens the wake notice the operator has to read.
         if reason == "gaveup":
+            tail = [ln for ln in store.tail(self.rd / store.WORK_LOG, 4096).splitlines()
+                    if ln.strip() and not ln.startswith(str(self.cfg["milestone_prefix"]))]
+            if tail:
+                lines.append("recent output: " + " ⟂ ".join(_clip(ln, _LINE_CLIP)
+                                                           for ln in tail[-_MAX_DIGEST_TAIL_LINES:]))
             lines.append("verdict: retries stopped, needs a human (details in events.jsonl / work.log)")
         return lines
 

@@ -30,7 +30,7 @@ This repository is meant to be portable, so all machine-specific paths are writt
 | `notify_on_complete` **fires once per process exit and has no lifetime cap** | `tools/process_registry.py`, `tools/process_registry_awaiting.py` | Choose it as the wake primitive: **one phase exit = one wake** |
 | `watch_patterns` per session: **15s cooldown / disabled after 3 consecutive cooldown hits / lifetime cap of 8 hits** | `tools/process_registry.py` (`WATCH_MIN_INTERVAL_SECONDS`, `WATCH_STRIKE_LIMIT`, `WATCH_LIFETIME_MAX_HITS`) | Never use it as a continuous channel; set `max_wakes` to 6 to keep headroom |
 | Every wake = **one full agent turn** (a turn in this session is on the order of 100k tokens of context — cached, but not free) | Measured against the local `state.db` | Aggregate and debounce first: merge milestones, retry failures inside a phase, never wake once per failure |
-| The WebUI drains `completion_queue` in `api/background_process.py` and **starts a wake turn server-side** (the browser does not need to be online); the wake turn **does not render live, it needs a refresh** | Header comment in that file + `routes.start_session_turn` | You must refresh to see progress; live bubbles would need a separate extension (phase two) |
+| The WebUI drains `completion_queue` in `api/background_process.py` and **starts a wake turn server-side** (the browser does not need to be online); the wake turn is **pushed into the session without a manual refresh** in the current WebUI build (observed 2026-10-25) | Header comment in that file + `routes.start_session_turn` | Progress shows up on its own; older kernel comments claiming a hard refresh is required are stale |
 | The default board's database lives at `<HERMES_HOME>/kanban.db`; only named boards live at `kanban/boards/<slug>/kanban.db` | `hermes_cli.kanban_db.kanban_db_path()` | Board paths **only ever go through the kernel function** (v1 died on string concatenation) |
 
 ---
@@ -183,7 +183,7 @@ script that never goes through the agent or the model; the only thing that burns
 | Item | Status |
 |---|---|
 | Phase exit → WebUI server-side wake turn | **Verified end to end** (2026-10-25 `drill-verify`: a 28-second task → phase exited at 14:52:49 → the source session received a wake, and the summary carried three milestones plus the `lease: hk lease` instruction) |
-| Wake-turn visibility | Requires a page refresh (kernel behaviour, not a problem in this project) |
+| Wake-turn visibility | The wake turn appears on its own in the current WebUI build (observed 2026-10-25); no manual refresh needed |
 | `hk kanban` against named boards (non-default) | The path goes through the kernel function, so it is consistent in theory; **only tested against the default board** |
 | `fallback_command` external call | Implemented, empty by default; the reference host only had a WeChat bridge, so it was not configured or exercised |
 | Job output over 256KB per tick | A single tick reads at most 256KB of deltas; the rest is read on the next tick — nothing is lost, but it lags by one tick |

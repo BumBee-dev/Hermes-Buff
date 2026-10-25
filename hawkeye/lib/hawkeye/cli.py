@@ -52,14 +52,18 @@ def cmd_run(args: argparse.Namespace, cfg: dict) -> int:
         "argv": argv,
         "cwd": os.path.abspath(args.cwd or os.getcwd()),
     })
-    print("HK-START %s started (detached job + separate supervision phase)" % rid)
+    # Banner only on an interactive terminal: in a background spawn stdout is a
+    # pipe and the kernel forwards our tail into the wake notice, where it is noise.
+    if sys.stdout.isatty():
+        print("HK-START %s started (detached job + separate supervision phase)" % rid)
     sys.stdout.flush()
     return phase.Phase(cfg, rid).run()
 
 
 def cmd_kanban(args: argparse.Namespace, cfg: dict) -> int:
     rid = _create(cfg, args, "kanban", {"board": args.board or "default"})
-    print("HK-START %s board watcher started (board=%s)" % (rid, args.board or "default"))
+    if sys.stdout.isatty():
+        print("HK-START %s board watcher started (board=%s)" % (rid, args.board or "default"))
     sys.stdout.flush()
     return phase.Phase(cfg, rid).run()
 
