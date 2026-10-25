@@ -129,7 +129,11 @@ def _describe(rid: str) -> dict:
     lease = store.read_json(rd / store.LEASE, {}) or {}
     seen = float(lease.get("agent_seen") or 0)
     if state.get("finished"):
-        status = "done" if result.get("reason") == "done" else "gave-up"
+        # finish_reason is the durable verdict; result.json only exists for the terminal reasons
+        # the phase wrote itself, so a run stopped by hand falls back to state and reads
+        # "stopped" instead of being displayed as a failure (#7).
+        reason = str(result.get("reason") or state.get("finish_reason") or "")
+        status = {"done": "done", "stopped": "stopped"}.get(reason, "gave-up")
     elif sup_age is not None and sup_age < 180:
         status = "running"
     else:
@@ -228,26 +232,11 @@ def cmd_events(args: argparse.Namespace, cfg: dict) -> int:
     return 0
 
 
-def cmd_stop(args: argparse.Namespace, cfg: dict) -> int:
-    rd = store.run_dir(args.run)
-    state = store.read_json(rd / store.STATE, {}) or {}
-    # Mark the run finished BEFORE killing anything: the phase re-reads state.json every tick
-    # and refuses to write over a finished run, so announcing the stop first closes the window
-    # where our kill lands and the loop answers it with a fresh attempt (#7). Patching keeps
-    # whatever the phase recorded since we read `state` above.
-    store.update_json(rd / store.STATE, {"finished": True, "finish_reason": "stopped",
-                                         "finished_at": time.time()})
-    # Two different processes matter here: state["job_pid"] is the `hk job` wrapper the phase
-    # spawned, while job.pid is the *command* the wrapper started with start_new_session=True —
-    # i.e. a process group of its own. Killing only the wrapper group leaves the real work
-    # running with nobody supervising it (measured: `hk stop` left the job command alive).
-    targets: list[tuple[int, int | None]] = []
-    pid = state.get("job_pid")
-    if pid:
-        targets.append((int(pid), state.get("job_pid_ticks")))
-    cmd_pid = job_mod.command_pid(rd)
-    if cmd_pid and cmd_pid != pid:
-        targets.append((cmd_pid, None))
+def _reap(targets: list[tuple[int, int | None]]) -> list[int]:
+    """SIGTERM every live target, escalate to SIGKILL, and return the pids still alive.
+
+    A shell waiting on a foreground child defers SIGTERM, so one signal is not a stop.
+    """
     for target, ticks in targets:
         if not store.pid_alive(target, ticks):
             continue
@@ -255,7 +244,6 @@ def cmd_stop(args: argparse.Namespace, cfg: dict) -> int:
             os.killpg(os.getpgid(target), signal.SIGTERM)
         except (ProcessLookupError, PermissionError):
             pass
-    # Give the group a moment to die, then make sure: a shell waiting on a child can ignore TERM.
     survivors: list[int] = []
     for target, ticks in targets:
         for _ in range(20):
@@ -273,8 +261,41 @@ def cmd_stop(args: argparse.Namespace, cfg: dict) -> int:
             time.sleep(0.05)
         else:
             survivors.append(target)
-    store.append_event(rd, "run_stopped", survivors=survivors or None)
-    print("stopped %s" % args.run)
+    return survivors
+
+
+def cmd_stop(args: argparse.Namespace, cfg: dict) -> int:
+    rd = store.run_dir(args.run)
+    state = store.read_json(rd / store.STATE, {}) or {}
+    already = bool(state.get("finished"))
+    if already:
+        # A stop must not relabel a run that reached its own verdict: a done run stays done.
+        # Anything of it that is still alive is reaped below all the same.
+        print("already finished: %s (%s)" % (args.run, state.get("finish_reason") or "-"))
+    else:
+        # Mark the run finished BEFORE killing anything: the phase re-reads state.json every
+        # tick and refuses to write over a finished run, so announcing the stop first closes
+        # the window where our kill lands and the loop answers it with a fresh attempt (#7).
+        # Patching keeps whatever the phase recorded since we read `state` above.
+        store.update_json(rd / store.STATE, {"finished": True, "finish_reason": "stopped",
+                                             "finished_at": time.time()})
+    # Two different processes matter here: state["job_pid"] is the `hk job` wrapper the phase
+    # spawned, while job.pid is the *command* the wrapper started with start_new_session=True —
+    # i.e. a process group of its own. Killing only the wrapper group leaves the real work
+    # running with nobody supervising it (measured: `hk stop` left the job command alive).
+    targets: list[tuple[int, int | None]] = []
+    pid = state.get("job_pid")
+    if pid:
+        targets.append((int(pid), state.get("job_pid_ticks")))
+    cmd_pid = job_mod.command_pid(rd)
+    if cmd_pid and cmd_pid != pid:
+        targets.append((cmd_pid, None))
+    survivors = _reap(targets)
+    if not already:
+        store.append_event(rd, "run_stopped", survivors=survivors or None)
+        print("stopped %s" % args.run)
+    elif survivors:
+        store.append_event(rd, "stop_reap", survivors=survivors)
     if survivors:
         # Never let a stop look successful while something it was meant to kill is still alive:
         # a watcher that survives its own stop is exactly the invisible-resource problem.

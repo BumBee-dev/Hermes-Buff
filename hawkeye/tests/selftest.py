@@ -720,10 +720,36 @@ def test_stop_stops_the_phase() -> None:
     check("stop2: the stop is not recorded as a failed attempt",
           int(state.get("attempts_done") or 0) == 0, str(state.get("attempts_done")))
     check("stop2: a stopped run leaves no result.json", not (RUNS / rid / "result.json").is_file())
+    row = next(r for r in json.loads(hk(["status", "--all", "--json"], conf).stdout)
+               if r["run"] == rid)
+    check("stop2: status reports the run as stopped", row["status"] == "stopped", str(row))
     try:
         os.killpg(os.getpgid(int(marker.read_text().strip())), signal.SIGKILL)
     except (OSError, ValueError):
         pass
+
+
+def test_stop_leaves_a_finished_run_alone() -> None:
+    """Stop must not relabel a run that already reached its own verdict (#7, same invariant).
+
+    The stop path writes finished/finish_reason; on a done run that would rewrite the record a
+    successful job earned, so it only reaps and says what it found.
+    """
+    conf = cfg("stopdone", poll_seconds=0.2)
+    rid = "stop-3"
+    hk(["run", "--id", rid, "--", "/bin/bash", "-c", "exit 0"], conf, timeout=60)
+    before = read(rid, "state.json") or {}
+    check("stop3: the run finished as done before the stop",
+          before.get("finish_reason") == "done", str(before))
+    proc = hk(["stop", "--run", rid], conf, check=False)
+    check("stop3: stopping a finished run succeeds", proc.returncode == 0, proc.stderr)
+    after = read(rid, "state.json") or {}
+    check("stop3: the verdict stays done", after.get("finish_reason") == "done", str(after))
+    check("stop3: no run_stopped event is recorded",
+          not [e for e in events(rid) if e["kind"] == "run_stopped"],
+          str([e["kind"] for e in events(rid)]))
+    check("stop3: the stop says the run was already finished",
+          "already finished" in proc.stdout, proc.stdout.strip())
 
 
 def test_installer_installs_every_reference() -> None:
@@ -773,6 +799,7 @@ def main() -> int:
                  test_agent_responsive, test_phase_death_recovery,
                  test_milestone_and_wake_discipline, test_phase_exits_when_the_run_disappears,
                  test_stop_kills_the_job_command, test_stop_stops_the_phase,
+                 test_stop_leaves_a_finished_run_alone,
                  test_installer_installs_every_reference,
                  test_kanban_watcher_reads_default_board,
                  test_named_board_is_not_the_default_board,
