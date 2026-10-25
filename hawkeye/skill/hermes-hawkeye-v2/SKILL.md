@@ -107,13 +107,16 @@ one model, treat the first two as mandatory.
   host with both an online and a local route: cards dispatched from a turn running on
   the online model came up on the local model, and the only visible symptom was
   slowness. `--provider` without `--model` is rejected, so set both or neither.
-- **`--completion-contract` when the card must produce evidence.** Clause (c) of the
-  gate is evaluated only for a card that carries a contract. A card created without one
-  cannot fail (c), however thin its evidence — the gate is not a substitute for writing
-  the contract down.
+- **`--completion-contract` when the card must produce evidence.** Every card carries a
+  contract: the kernel defaults it to `local-only` (`validate_contract(None)`), and clause
+  (c) exempts `local-only`. So a card created without the flag cannot fail (c), however
+  thin its evidence — (c)'s strictness comes from the dispatch, not from the gate mode.
+  Pass `OWNER/REPO` or an exact PR URL when the card has to publish; writing
+  `--completion-contract local-only` is the same as omitting the flag.
 - **Re-dispatch repeats the parameters.** `reassign` and `set-model` change the profile
-  and the model of an existing card; a card created to replace a blocked one starts
-  from nothing, so restate the overrides and the contract explicitly.
+  and the model of an existing card; `set-model none` clears the override (model and
+  provider are cleared together). A card created to replace a blocked one starts from
+  nothing, so restate the overrides and the contract explicitly.
 
 ## Judgement and correction (dispatch scenarios)
 
@@ -161,11 +164,11 @@ noise bothers you.
 
 ## Pitfalls
 
-- A card created without `--provider` / `--model` runs on the host default and reports
-  nothing about it. On a multi-model host that is a silent mis-dispatch rather than a
+- **A card created without `--provider` / `--model` runs on the host default and says
+  nothing about it.** On a multi-model host that is a silent mis-dispatch rather than a
   fallback — the same failure family as the concatenated board path: no error, wrong
-  result, and the mistake only shows up as a number that does not match the bill or the
-  speed you expected.
+  result, and the only visible symptom is a latency figure that does not match what you
+  expected.
 - **The board DB path must come from the kernel's `kanban_db_path()`**: the default
   board lives at `<HERMES_HOME>/kanban.db`, and concatenating
   `boards/<slug>/kanban.db` writes zero events without any error (this is exactly
