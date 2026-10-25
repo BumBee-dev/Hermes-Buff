@@ -36,6 +36,7 @@ linked here and must be preserved in any redistribution.
 | Qwen3.5-4B (GGUF, MTP head) | https://huggingface.co/unsloth/Qwen3.5-4B-MTP-GGUF | Qwen licence (see the model card) |
 | bge-m3 embeddings | https://huggingface.co/ggml-org/bge-m3-Q8_0-GGUF | MIT — BAAI |
 | bge-reranker-v2-m3 | https://huggingface.co/gpustack/bge-reranker-v2-m3-GGUF | MIT — BAAI |
+| Qwen3-Reranker-0.6B (optional reranker) | weights: https://huggingface.co/Qwen/Qwen3-Reranker-0.6B (Apache-2.0); GGUF conversion used by default: https://huggingface.co/mradermacher/Qwen3-Reranker-0.6B-GGUF | Apache-2.0 — Alibaba Qwen |
 
 Model weights are **not** included in this repository or in the published image.
 Download them yourself and comply with each model's own licence.

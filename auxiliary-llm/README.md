@@ -116,6 +116,7 @@ defaults in `config/.env.example`, so no renaming is needed.
 | LLM (with MTP head) | `qwen3.5-4b-q8_0.gguf` | 4.61 GB | https://huggingface.co/unsloth/Qwen3.5-4B-MTP-GGUF/resolve/main/Qwen3.5-4B-Q8_0.gguf |
 | Embeddings | `bge-m3-q8_0.gguf` | 634 MB | https://huggingface.co/ggml-org/bge-m3-Q8_0-GGUF/resolve/main/bge-m3-q8_0.gguf |
 | Reranking | `bge-reranker-v2-m3-q8_0.gguf` | 636 MB | https://huggingface.co/gpustack/bge-reranker-v2-m3-GGUF/resolve/main/bge-reranker-v2-m3-Q8_0.gguf |
+| Reranking (**optional**, stronger but slower) | `qwen3-reranker-0.6b-q8_0.gguf` | 639 MB | https://huggingface.co/mradermacher/Qwen3-Reranker-0.6B-GGUF/resolve/main/Qwen3-Reranker-0.6B.Q8_0.gguf |
 
 ```bash
 mkdir -p models
@@ -136,6 +137,41 @@ Notes:
   quantisation up as needed. The names above are defaults, not requirements.
 - Model licences are yours to comply with: the Qwen weights carry their own
   licence, bge-m3 and bge-reranker are MIT from BAAI.
+
+### Optional: Qwen3-Reranker-0.6B instead of bge-reranker-v2-m3
+
+Both rerankers speak the same `/v1/rerank` API, so this is a one-line swap. The
+Qwen model ranks better and is noticeably slower — on the author's own NFCorpus
+run, nDCG@10 was **0.7001 for Qwen3-Reranker-0.6B** against **0.6340 for
+bge-reranker-v2-m3**, at roughly three times the latency per query. Pick it when
+recall quality matters more than the millisecond budget.
+
+```bash
+# 1. download (a third-party GGUF conversion of the official Apache-2.0 weights)
+curl -L --fail -o models/qwen3-reranker-0.6b-q8_0.gguf \
+  https://huggingface.co/mradermacher/Qwen3-Reranker-0.6B-GGUF/resolve/main/Qwen3-Reranker-0.6B.Q8_0.gguf
+
+# 2. point the reranker at it (keep the alias so clients need no change)
+sed -i 's|^RERANK_MODEL=.*|RERANK_MODEL=qwen3-reranker-0.6b-q8_0.gguf|' .env
+
+# 3. recreate only that container
+docker compose up -d reranker
+./config/scripts/verify.sh
+```
+
+About the weights: Qwen publishes the model as **safetensors**, not GGUF
+(https://huggingface.co/Qwen/Qwen3-Reranker-0.6B, Apache-2.0). The link above is
+a community conversion; GGUF conversions of the same model differ by a few KB
+depending on the converter and llama.cpp version, which is expected. If you would
+rather not trust a third-party artifact, convert it yourself:
+
+```bash
+pip install -r https://raw.githubusercontent.com/ggml-org/llama.cpp/master/requirements/requirements-convert_hf_to_gguf.txt
+python convert_hf_to_gguf.py /path/to/Qwen3-Reranker-0.6B --outtype q8_0 --outfile models/qwen3-reranker-0.6b-q8_0.gguf
+```
+
+`verify.sh` checks rerank ordering, not which reranker is loaded, so run it after
+either swap.
 
 ## Configuration
 

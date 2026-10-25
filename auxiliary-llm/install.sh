@@ -178,6 +178,8 @@ echo
 check_model "$LLM_FILE" "$LLM_URL"
 check_model "$EMBED_FILE" "$EMBED_URL"
 check_model "$RERANK_FILE" "$RERANK_URL"
+note "optional : qwen3-reranker-0.6b-q8_0.gguf is a stronger (slower) reranker;"
+note "           see the README section 'Optional: Qwen3-Reranker-0.6B' to swap it in"
 
 if [ "$missing" -ne 0 ]; then
     echo
