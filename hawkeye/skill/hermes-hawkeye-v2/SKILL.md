@@ -93,6 +93,28 @@ exits, the phase reports, the session wakes, and the wake turn quotes the milest
 text back to the user. The `sleep` has to be longer than your estimate of the time
 left in the current turn.
 
+## Dispatch parameters (set them on the card, never inherit them)
+
+A card is executed by a worker that starts its own session, so nothing about the
+dispatching turn reaches it unless it is written on the card. `hermes kanban create`
+takes `--provider`, `--model` and `--completion-contract`; on a host with more than
+one model, treat the first two as mandatory.
+
+- **`--provider` and `--model` on every card, always together.** A worker session takes
+  its model from `task.model_override` / `provider_override`, and otherwise falls back
+  to the host default. The fallback is silent: the card runs, produces output, and
+  nothing in the card log says the model was not the one you intended. Observed on a
+  host with both an online and a local route: cards dispatched from a turn running on
+  the online model came up on the local model, and the only visible symptom was
+  slowness. `--provider` without `--model` is rejected, so set both or neither.
+- **`--completion-contract` when the card must produce evidence.** Clause (c) of the
+  gate is evaluated only for a card that carries a contract. A card created without one
+  cannot fail (c), however thin its evidence — the gate is not a substitute for writing
+  the contract down.
+- **Re-dispatch repeats the parameters.** `reassign` and `set-model` change the profile
+  and the model of an existing card; a card created to replace a blocked one starts
+  from nothing, so restate the overrides and the contract explicitly.
+
 ## Judgement and correction (dispatch scenarios)
 
 - Judge against the acceptance criteria written into the card body, never against
@@ -104,6 +126,12 @@ left in the current turn.
 - Not acceptable: `kanban_block` with what is missing, then re-dispatch via a new
   card / `reassign` / `set-model`, and report one line.
 - Acceptable: one line, move to the next batch.
+- **Never let the work decompose its own card.** Cards are the unit of relay and the
+  unit the gate judges; a worker that creates child cards moves work out from under the
+  card you are about to accept, and the pipeline loses its single source of truth. If a
+  card is too large, split it at design time instead — `--triage` plus
+  `hermes kanban decompose`, or several sibling cards with explicit dependencies and
+  one contract each.
 
 ## Operations
 
@@ -133,6 +161,11 @@ noise bothers you.
 
 ## Pitfalls
 
+- A card created without `--provider` / `--model` runs on the host default and reports
+  nothing about it. On a multi-model host that is a silent mis-dispatch rather than a
+  fallback — the same failure family as the concatenated board path: no error, wrong
+  result, and the mistake only shows up as a number that does not match the bill or the
+  speed you expected.
 - **The board DB path must come from the kernel's `kanban_db_path()`**: the default
   board lives at `<HERMES_HOME>/kanban.db`, and concatenating
   `boards/<slug>/kanban.db` writes zero events without any error (this is exactly
