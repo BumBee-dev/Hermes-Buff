@@ -190,12 +190,38 @@ def cmd_events(args: argparse.Namespace, cfg: dict) -> int:
 def cmd_stop(args: argparse.Namespace, cfg: dict) -> int:
     rd = store.run_dir(args.run)
     state = store.read_json(rd / store.STATE, {}) or {}
+    # Two different processes matter here: state["job_pid"] is the `hk job` wrapper the phase
+    # spawned, while job.pid is the *command* the wrapper started with start_new_session=True —
+    # i.e. a process group of its own. Killing only the wrapper's group leaves the real work
+    # running with nobody supervising it (measured: `hk stop` left the job command alive).
+    targets: list[tuple[int, int | None]] = []
     pid = state.get("job_pid")
-    if pid and store.pid_alive(int(pid), state.get("job_pid_ticks")):
+    if pid:
+        targets.append((int(pid), state.get("job_pid_ticks")))
+    try:
+        cmd_pid = int((rd / store.JOB_PID).read_text().strip())
+    except (OSError, ValueError):
+        cmd_pid = None
+    if cmd_pid and cmd_pid != pid:
+        targets.append((cmd_pid, None))
+    for target, ticks in targets:
+        if not store.pid_alive(target, ticks):
+            continue
         try:
-            os.killpg(os.getpgid(int(pid)), signal.SIGTERM)
+            os.killpg(os.getpgid(target), signal.SIGTERM)
         except (ProcessLookupError, PermissionError):
             pass
+    # Give the group a moment to die, then make sure: a shell waiting on a child can ignore TERM.
+    for target, ticks in targets:
+        for _ in range(20):
+            if not store.pid_alive(target, ticks):
+                break
+            time.sleep(0.05)
+        else:
+            try:
+                os.killpg(os.getpgid(target), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
     store.write_json(rd / store.STATE, {**state, "finished": True,
                                         "finish_reason": "stopped",
                                         "finished_at": time.time()})

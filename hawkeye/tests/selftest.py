@@ -288,6 +288,43 @@ def test_phase_exits_when_the_run_disappears() -> None:
           not (RUNS / rid / "meta.json").exists(), str(RUNS / rid))
 
 
+def test_stop_kills_the_job_command() -> None:
+    """``hk stop`` must kill the command, not just the ``hk job`` wrapper.
+
+    The wrapper starts the command with ``start_new_session=True``, so the command is its own
+    process group and ``killpg(getpgid(wrapper))`` never reaches it. Measured while restarting
+    the in-session watcher: the wrapper died, the bash watcher kept running with a deleted run
+    directory — the same "work with no supervisor" shape as #4, caused by the stop path itself.
+    """
+    conf = cfg("stopkill", poll_seconds=0.2)
+    rid = "stop-1"
+    env = {**ENV, "HAWKEYE_V2_CONFIG": str(conf)}
+    phase = subprocess.Popen([sys.executable, str(HK), "run", "--id", rid, "--",
+                              "/bin/bash", "-c", "sleep 91"],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
+    started = wait_for(lambda: (read(rid, "state.json") or {}).get("job_pid"), 10)
+    check("stop: the job is running before the stop", bool(started))
+    # job.pid is written by the wrapper after it spawns the command, so it lands just after
+    # state["job_pid"] — wait for it instead of racing it.
+    wait_for(lambda: (RUNS / rid / "job.pid").is_file(), 10)
+    try:
+        cmd_pid = int((RUNS / rid / "job.pid").read_text().strip())
+    except (OSError, ValueError):
+        cmd_pid = None
+    check("stop: job.pid records the command's pid", bool(cmd_pid), str(cmd_pid))
+    hk(["stop", "--run", rid], conf)
+    gone = wait_for(lambda: not os.path.exists("/proc/%d" % cmd_pid), 10) if cmd_pid else False
+    check("stop: the command process is gone after the stop", gone,
+          "command pid still alive: %s" % cmd_pid)
+    if not gone and cmd_pid:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(os.getpgid(cmd_pid), signal.SIGKILL)
+    wait_for(lambda: phase.poll() is not None, 10)
+    if phase.poll() is None:
+        phase.kill()
+    phase.wait(timeout=5)
+
+
 def test_kanban_watcher_reads_default_board() -> None:
     """v1 died on string-joining `boards/<slug>/kanban.db`: the default board's db lives
     in <home>/kanban.db. This uses a copy of the real db to prove this version goes
@@ -570,6 +607,7 @@ def main() -> int:
     for test in (test_retry_then_success, test_stall_is_detected, test_agent_unreachable,
                  test_agent_responsive, test_phase_death_recovery,
                  test_milestone_and_wake_discipline, test_phase_exits_when_the_run_disappears,
+                 test_stop_kills_the_job_command,
                  test_kanban_watcher_reads_default_board,
                  test_named_board_is_not_the_default_board,
                  test_gate_check_reports_ungated_profiles,

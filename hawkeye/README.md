@@ -244,7 +244,7 @@ file; the tool never touches the repository and takes the token from the environ
 | Unreachable-agent incident (`agent_unreachable`) | **Verified deterministically** as of the current test suite: the test now waits for the report and for the lease to exceed `wake_grace_seconds` instead of relying on doctor startup being slow. The previous version flaked (2 of 3 runs) and the flake landed exactly on this path |
 | `fallback_command` external call | Implemented, empty by default; the reference host only had a WeChat bridge, so it was not configured or exercised |
 | Job output over 256KB per tick | A single tick reads at most 256KB of deltas; the rest is read on the next tick — nothing is lost, but it lags by one tick |
-| A run directory removed underneath a live run | The supervision phase exits within one poll (`HK-ERROR run directory disappeared`) and does not recreate it. It does **not** kill the job child: deleting a run root means "forget this run", not "stop the work", and `hk gc` never deletes a live run — only an outside `rm` can get here. Use `hk stop --run <id>` when the intent is to stop |
+| A run directory removed underneath a live run | The supervision phase exits within one poll (`HK-ERROR run directory disappeared`) and does not recreate it. It does **not** kill the job child: deleting a run root means "forget this run", not "stop the work", and `hk gc` never deletes a live run — only an outside `rm` can get here. Use `hk stop --run <id>` when the intent is to stop: it kills the command's **own** process group (the wrapper starts it with `start_new_session=True`, so the wrapper's group is a different one) |
 
 ---
 
