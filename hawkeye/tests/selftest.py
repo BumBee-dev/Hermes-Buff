@@ -726,6 +726,41 @@ def test_stop_stops_the_phase() -> None:
         pass
 
 
+def test_installer_installs_every_reference() -> None:
+    """A self-consistent tree is not an installed artifact that is complete (#6).
+
+    The installer is the only thing a fresh host runs, so this test runs it with every path
+    redirected into the scratch root and then reads the *installed* copy: SKILL.md names four
+    references, and a copy step that forgets one leaves an agent following dead pointers while
+    the repository still looks right.
+    """
+    try:
+        managed = subprocess.run(["systemctl", "--user", "show-environment"],
+                                 capture_output=True, timeout=20).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        managed = False
+    if not managed:
+        print("  SKIP install: no user systemd manager for the daemon-reload step")
+        return
+    home = BASE / "install-home"
+    skill = BASE / "install-skill"
+    installer = Path(__file__).resolve().parents[1] / "install.sh"
+    proc = subprocess.run(["bash", str(installer), "--no-enable",
+                           "--hermes-home", str(home), "--config", str(BASE / "install.toml"),
+                           "--skill-dir", str(skill)],
+                          capture_output=True, text=True, timeout=120,
+                          env={**ENV, "HERMES_HOME": str(home),
+                               "XDG_CONFIG_HOME": str(BASE / "install-xdg")})
+    check("install: the installer succeeds with every path redirected", proc.returncode == 0,
+          (proc.stderr or proc.stdout).strip()[-300:])
+    entry = skill / "SKILL.md"
+    check("install: SKILL.md lands in the skill directory", entry.is_file())
+    named = sorted(set(re.findall(r"references/[A-Za-z0-9._-]+\.md", entry.read_text())))
+    check("install: SKILL.md still names its references", bool(named), str(named))
+    missing = [name for name in named if not (skill / name).is_file()]
+    check("install: every reference SKILL.md names is installed", not missing, str(missing))
+
+
 def main() -> int:
     if not HK.is_file():
         print("cannot find %s" % HK)
@@ -738,6 +773,7 @@ def main() -> int:
                  test_agent_responsive, test_phase_death_recovery,
                  test_milestone_and_wake_discipline, test_phase_exits_when_the_run_disappears,
                  test_stop_kills_the_job_command, test_stop_stops_the_phase,
+                 test_installer_installs_every_reference,
                  test_kanban_watcher_reads_default_board,
                  test_named_board_is_not_the_default_board,
                  test_gate_check_reports_ungated_profiles,
