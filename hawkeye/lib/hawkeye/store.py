@@ -50,17 +50,55 @@ def hermes_home() -> Path:
     return Path(env).expanduser() if env else Path.home() / ".hermes"
 
 
+def cache_dir() -> Path:
+    """Tool-private scratch space, in the layout Hermes itself uses: ``<home>/cache/<tool>/``.
+
+    Runtime artefacts (run directories) are nobody's configuration and must not accumulate at
+    the top of ``HERMES_HOME``: that directory is a documented list, so every extra entry there
+    is a thing a user has to reason about when deciding what is safe to delete. ``cache/`` is
+    the one place whose whole contract is "safe to lose".
+    """
+    return hermes_home() / "cache" / "hawkeye"
+
+
 def run_root(base: str | None = None) -> Path:
     if base:
         return Path(base).expanduser()
     env = os.environ.get("HAWKEYE_V2_ROOT", "").strip()
     if env:
         return Path(env).expanduser()
-    return hermes_home() / "hawkeye-v2" / "runs"
+    return cache_dir() / "runs"
 
 
 def run_dir(run_id: str, base: str | None = None) -> Path:
     return run_root(base) / run_id
+
+
+def prunable_runs(root: Path, days: float, *, keep_incidents: bool = True) -> list[Path]:
+    """Finished runs older than *days* that may be deleted.
+
+    One predicate for both ``hk gc`` and the doctor sweep: "may this directory go" must have
+    exactly one answer, or the two callers drift and a run survives one of them and not the
+    other. An unfinished run is never returned -- its phase may still be alive and would keep
+    writing into a directory that no longer exists.
+    """
+    if days <= 0 or not root.is_dir():
+        return []
+    now = time.time()
+    out: list[Path] = []
+    for rd in sorted(root.iterdir()):
+        if not rd.is_dir() or not (rd / META).is_file():
+            continue
+        state = read_json(rd / STATE, {}) or {}
+        if not state.get("finished"):
+            continue
+        finished_at = float(state.get("finished_at") or 0)
+        if finished_at and (now - finished_at) < days * 86400:
+            continue
+        if keep_incidents and (rd / INCIDENT).is_file():
+            continue
+        out.append(rd)
+    return out
 
 
 def new_run_id(kind: str) -> str:

@@ -24,7 +24,7 @@
 # Overrides (env or flag):
 #   HERMES_HOME        --hermes-home DIR   Hermes home (default: $HOME/.hermes)
 #   HAWKEYE_V2_CONFIG  --config FILE       hawkeye.toml path (default:
-#                                          $HERMES_HOME/hawkeye-v2/hawkeye.toml,
+#                                          $XDG_CONFIG_HOME/hawkeye/hawkeye.toml,
 #                                          created from the example)
 #   HAWKEYE_KERNEL_SRC --kernel-src DIR    Hermes source checkout, for board resolution
 #                                          (default: unset -> the unit omits it)
@@ -118,8 +118,18 @@ HERMES_HOME="${HERMES_HOME/#\~/$HOME}"
 # and resolving it up top silently kept an inherited value instead (measured: with
 # HERMES_HOME exported in the environment, --hermes-home /tmp/x still wrote to the
 # inherited home).
-HAWKEYE_V2_CONFIG="${HAWKEYE_V2_CONFIG:-$HERMES_HOME/hawkeye-v2/hawkeye.toml}"
+HAWKEYE_V2_CONFIG="${HAWKEYE_V2_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/hawkeye/hawkeye.toml}"
 HAWKEYE_V2_CONFIG="${HAWKEYE_V2_CONFIG/#\~/$HOME}"
+
+# Old installs kept the config inside HERMES_HOME. Move it rather than starting over: a silent
+# fall back to defaults looks exactly like "all my tuning was ignored".
+LEGACY_CONFIG="$HERMES_HOME/hawkeye-v2/hawkeye.toml"
+if [ ! -f "$HAWKEYE_V2_CONFIG" ] && [ -f "$LEGACY_CONFIG" ]; then
+    mkdir -p "$(dirname "$HAWKEYE_V2_CONFIG")"
+    mv "$LEGACY_CONFIG" "$HAWKEYE_V2_CONFIG"
+    note "migrated config out of HERMES_HOME: $LEGACY_CONFIG -> $HAWKEYE_V2_CONFIG"
+    rmdir "$HERMES_HOME/hawkeye-v2" 2>/dev/null || true
+fi
 SKILL_DEST="${SKILL_DEST:-$HERMES_HOME/skills/software-development/hermes-hawkeye-v2}"
 
 render_service() {

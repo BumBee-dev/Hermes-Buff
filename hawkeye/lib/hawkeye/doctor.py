@@ -8,6 +8,7 @@ It is meant to run from a systemd user timer (``config/systemd/hawkeye-doctor.*`
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 import sys
 import time
@@ -18,6 +19,24 @@ from . import store
 
 INCIDENT_UNREACHABLE = "agent_unreachable"
 INCIDENT_CRASH_LOOP = "phase_crash_loop"
+
+
+def _prune_old_runs(cfg: dict) -> int:
+    """Delete finished runs past ``retention_days``; incidents are evidence and stay.
+
+    Housekeeping belongs here rather than in a user's memory: this sweep already runs every two
+    minutes, it is the only thing guaranteed to run on a host nobody is watching, and without it
+    the run cache grows for the life of the machine with no one able to tell which entries still
+    matter.
+    """
+    days = float(cfg.get("retention_days", 0) or 0)
+    if days <= 0:
+        return 0
+    removed = 0
+    for rd in store.prunable_runs(store.run_root(), days):
+        shutil.rmtree(rd, ignore_errors=True)
+        removed += 1
+    return removed
 
 
 def _restart(cfg: dict, rd: Path, meta: dict) -> Optional[int]:
@@ -101,6 +120,11 @@ def scan(cfg: dict, fix: bool = False) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     if not root.is_dir():
         return rows
+    if fix:
+        pruned = _prune_old_runs(cfg)
+        if pruned:
+            print("[hawkeye] pruned %d finished run(s) older than %.0f days"
+                  % (pruned, float(cfg.get("retention_days", 0))))
     for rd in sorted(root.iterdir()):
         if not rd.is_dir():
             continue

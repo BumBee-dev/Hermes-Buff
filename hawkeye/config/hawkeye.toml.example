@@ -18,6 +18,12 @@ attempt_timeout_seconds = 3600.0         # hard cap per attempt (timeout = kill 
 # this to 0 or emit a heartbeat line every few polls; otherwise a correct, healthy process
 # is killed as stalled and retried on a loop.
 stall_seconds = 900.0
+# ── Housekeeping ────────────────────────────────────────────
+# The doctor sweep (every 2 min on a normal install) deletes *finished* run directories older
+# than this, so the run cache does not grow for the life of the host. Runs with an incident are
+# kept -- they are the evidence someone comes back for. 0 disables the sweep.
+retention_days = 7.0
+
 poll_seconds = 2.0              # polling interval of the supervisor phase
 
 # ── Reporting cadence ───────────────────────────────────────

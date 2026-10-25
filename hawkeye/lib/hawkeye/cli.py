@@ -210,6 +210,27 @@ def cmd_watch_file(args: argparse.Namespace, cfg: dict) -> int:
         time.sleep(interval)
 
 
+def cmd_paths(args: argparse.Namespace, cfg: dict) -> int:
+    """Print where hk reads its config and writes its runtime directories.
+
+    Exists because "which of these directories is yours and can I delete it" is a question a
+    user should not have to answer by reading the source. Everything hk writes lives under
+    ``<HERMES_HOME>/cache/hawkeye/`` -- the same ``cache/<tool>/`` shape Hermes uses for its own
+    tool caches -- so deleting that one directory returns the host to a clean state.
+    """
+    conf = cfg_mod.default_path()
+    runs = store.run_root()
+    cache = store.cache_dir()
+    if args.json:
+        print(json.dumps({"config": str(conf), "config_exists": conf.is_file(),
+                          "runs": str(runs), "cache": str(cache)}, indent=2))
+        return 0
+    print("config : %s%s" % (conf, "" if conf.is_file() else "  (missing: defaults in use)"))
+    print("runs   : %s" % runs)
+    print("cache  : %s  <- everything hk writes lives here, safe to delete when idle" % cache)
+    return 0
+
+
 def cmd_gate_check(args: argparse.Namespace, cfg: dict) -> int:
     """Report gate coverage per profile — the gate plugin loads per profile, not per host."""
     rows = gatecheck.report()
@@ -380,6 +401,8 @@ def build_parser() -> argparse.ArgumentParser:
         if name == "status":
             sp.add_argument("--json", action="store_true")
 
+    pa = sub.add_parser("paths", help="where hk reads config and writes runtime directories")
+    pa.add_argument("--json", action="store_true", help="machine-readable output")
     wf = sub.add_parser("watch-file",
                         help="block until a file changes, then exit (producer-notifies-consumer)")
     wf.add_argument("--path", required=True, help="file whose content is the signal")
@@ -416,6 +439,6 @@ def main(argv: list[str] | None = None) -> int:
         "run": cmd_run, "kanban": cmd_kanban, "phase": cmd_phase, "job": cmd_job,
         "status": cmd_status, "lease": cmd_lease, "doctor": cmd_doctor,
         "events": cmd_events, "stop": cmd_stop, "gc": cmd_gc,
-        "gate-check": cmd_gate_check, "watch-file": cmd_watch_file,
+        "gate-check": cmd_gate_check, "watch-file": cmd_watch_file, "paths": cmd_paths,
     }
     return handlers[args.cmd](args, cfg)

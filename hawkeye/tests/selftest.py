@@ -238,6 +238,110 @@ def test_watch_file_exits_when_the_producer_writes() -> None:
           quiet.returncode == 0 and "no change for" in quiet.stdout, quiet.stdout[-120:])
 
 
+def test_nothing_is_written_at_the_hermes_home_root() -> None:
+    """HERMES_HOME's top level is a short, documented list — a tool must not extend it.
+
+    A user deciding what is safe to delete reads that directory; every extra entry is a decision
+    they have to make twice (is this Hermes', is it mine, does deleting it break something).
+    Runtime artefacts therefore go where Hermes itself puts tool caches: cache/<tool>/. The
+    contract is one line — delete cache/hawkeye and the host is clean again.
+    """
+    home = BASE / "home-root"
+    home.mkdir()
+    conf = cfg("home")
+    env = {**ENV, "HERMES_HOME": str(home), "HAWKEYE_V2_CONFIG": str(conf)}
+    env.pop("HAWKEYE_V2_ROOT", None)                       # exercise the real default
+    job = script("home.sh", "#!/bin/bash\necho hi\n")
+    proc = subprocess.run([sys.executable, str(HK), "run", "--id", "home-1", "--", "/bin/bash", str(job)],
+                          capture_output=True, text=True, timeout=90, env=env)
+    top = sorted(p.name for p in home.iterdir())
+    check("home root: hk writes nothing at the top of HERMES_HOME", top == ["cache"], str(top))
+    check("home root: the run directory is under cache/hawkeye/runs",
+          (home / "cache" / "hawkeye" / "runs" / "home-1" / "result.json").is_file(),
+          proc.stdout[-200:] + proc.stderr[-200:])
+
+    paths = subprocess.run([sys.executable, str(HK), "paths", "--json"],
+                           capture_output=True, text=True, timeout=30, env=env)
+    info = json.loads(paths.stdout or "{}")
+    check("home root: hk paths reports the same directories it writes",
+          info.get("runs") == str(home / "cache" / "hawkeye" / "runs"), paths.stdout[:200])
+
+
+def test_config_resolution_prefers_xdg_and_keeps_legacy_working() -> None:
+    """Config is the user's, not runtime state: it must not need a directory inside HERMES_HOME.
+
+    The legacy rung exists so an existing install does not silently fall back to defaults (which
+    would look like every tuning knob had been reset), not so new installs keep using it.
+    """
+    home = BASE / "home-cfg"
+    xdg = BASE / "xdg"
+    (home / "hawkeye-v2").mkdir(parents=True)
+    (xdg / "hawkeye").mkdir(parents=True)
+    legacy = home / "hawkeye-v2" / "hawkeye.toml"
+    legacy.write_text("attempts = 2\n")
+    xdg_conf = xdg / "hawkeye" / "hawkeye.toml"
+    xdg_conf.write_text("attempts = 1\n")
+    base = {"HERMES_HOME": str(home), "XDG_CONFIG_HOME": str(xdg)}
+
+    def resolved(**over):
+        env = {**ENV, **base}
+        env.pop("HAWKEYE_V2_CONFIG", None)                  # clear the suite's own override
+        env.update(over)                                    # ... unless the test passes one
+        out = subprocess.run([sys.executable, str(HK), "paths", "--json"],
+                             capture_output=True, text=True, timeout=30, env=env).stdout
+        return json.loads(out or "{}").get("config")
+
+    check("config: the XDG copy wins over a legacy file", resolved() == str(xdg_conf), resolved())
+    xdg_conf.unlink()
+    check("config: a legacy file still works, so existing tuning is not reset",
+          resolved() == str(legacy), resolved())
+    legacy.unlink()
+    check("config: with neither present the XDG path is reported as the target",
+          resolved() == str(xdg_conf), resolved())
+    check("config: an explicit HAWKEYE_V2_CONFIG still wins everything",
+          resolved(HAWKEYE_V2_CONFIG=str(BASE / "explicit.toml")) == str(BASE / "explicit.toml"))
+
+
+def test_doctor_prunes_old_runs_but_keeps_evidence() -> None:
+    """Housekeeping cannot depend on a human remembering to run `hk gc`.
+
+    The run cache lives in HERMES_HOME/cache now, which is exactly the kind of directory that
+    grows for the life of the host while nobody looks. The doctor sweep already runs every two
+    minutes on hosts with no one watching, so retention belongs there -- incidents stay, because
+    they are the evidence someone will come back for.
+    """
+    conf = cfg("prune", retention_days=7)
+    now = time.time()
+    def fake_run(name: str, finished: bool, age_days: float, incident: bool = False) -> Path:
+        rd = RUNS / name
+        rd.mkdir(parents=True, exist_ok=True)
+        (rd / "meta.json").write_text(json.dumps({"kind": "exec"}))
+        state = {"finished": finished, "finished_at": now - age_days * 86400, "reports": 0}
+        (rd / "state.json").write_text(json.dumps(state))
+        if incident:
+            (rd / "incident.json").write_text(json.dumps({"kind": "attempts_exhausted"}))
+        return rd
+
+    old = fake_run("prune-old", True, 10)
+    old_incident = fake_run("prune-old-incident", True, 10, incident=True)
+    young = fake_run("prune-young", True, 1)
+    live = fake_run("prune-live", False, 30)
+    # doctor exits 1 when an incident exists (that is its contract); the assertions below
+    # are about the directories, not the exit code.
+    hk(["doctor", "--fix"], conf, check=False)
+    check("prune: a finished run past retention is removed", not old.exists())
+    check("prune: an incident is kept as evidence", old_incident.exists())
+    check("prune: a young run is kept", young.exists())
+    check("prune: an unfinished run is never removed", live.exists())
+
+    off = cfg("prune-off", retention_days=0)
+    surviving = fake_run("prune-off-old", True, 99)
+    hk(["doctor", "--fix"], off, check=False)
+    check("prune: retention_days = 0 disables the sweep", surviving.exists())
+    for rd in (old_incident, young, live, surviving):
+        shutil.rmtree(rd, ignore_errors=True)
+
+
 # ── 3. agent stops renewing -> doctor raises an incident ─────────────────
 def test_agent_unreachable() -> None:
     """A report that nobody acknowledges has to end in an incident.
@@ -705,8 +809,11 @@ def test_stop_stops_the_phase() -> None:
     check("stop2: the job is running before the stop", bool(started))
     hk(["stop", "--run", rid], conf)
     # Two full attempt windows: the regression showed up one second after the stop as
-    # attempt_start, and paid off as a report one attempt later.
-    ended = wait_for(lambda: phase.poll() is not None, 4.0)
+    # attempt_start, and paid off as a report one attempt later. The window is generous on
+    # purpose -- a loaded host once made 4s too tight and produced a false red, and a flaky
+    # assertion here is worse than a slow one: it either hides a regression or teaches people
+    # to re-run the suite until it passes.
+    ended = wait_for(lambda: phase.poll() is not None, 10.0)
     if phase.poll() is None:
         phase.kill()
     phase.wait(timeout=5)
@@ -795,6 +902,9 @@ def main() -> int:
     for test in (test_retry_then_success, test_stall_is_detected, test_stall_zero_disables_the_check,
                  test_skill_ships_every_file_it_points_at,
                  test_watch_file_exits_when_the_producer_writes,
+                 test_nothing_is_written_at_the_hermes_home_root,
+                 test_config_resolution_prefers_xdg_and_keeps_legacy_working,
+                 test_doctor_prunes_old_runs_but_keeps_evidence,
                  test_agent_unreachable,
                  test_agent_responsive, test_phase_death_recovery,
                  test_milestone_and_wake_discipline, test_phase_exits_when_the_run_disappears,

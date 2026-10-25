@@ -96,3 +96,12 @@ The report file is the contract: inspectable afterwards, survives both processes
 cannot fire on a clock tick. Say the shape out loud when arming ("watches this file, wakes on
 change, gives up after 12h with a line"), because an unannounced watcher is the invisible-resource
 problem again.
+
+## Respect the host's directory layout
+
+`HERMES_HOME` is a short, documented list of directories Hermes owns; a tool that adds entries to
+its top level taxes every future cleanup decision. hawkeye writes only under
+`<HERMES_HOME>/cache/hawkeye/` (the same `cache/<tool>/` shape Hermes uses for its own caches) and
+keeps its config at `$XDG_CONFIG_HOME/hawkeye/hawkeye.toml`. `hk paths` prints all three paths, and
+two tests keep it that way — one asserts a run leaves nothing but `cache/` at the home root, the
+other asserts config resolution never *requires* a directory inside `HERMES_HOME`.

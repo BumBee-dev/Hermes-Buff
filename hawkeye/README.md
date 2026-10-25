@@ -232,6 +232,38 @@ file; the tool never touches the repository and takes the token from the environ
 
 ---
 
+## 7b. Where hawkeye writes (and what is safe to delete)
+
+`HERMES_HOME` is a documented, short list of directories that Hermes itself owns. A tool that adds
+entries to its top level makes every future cleanup decision harder — "is this mine, is it Hermes',
+does deleting it break something" — so hawkeye keeps the same shape Hermes uses for its own tool
+caches (`cache/project_skill_scans`, `cache/banner_snapshot.json`, `cache/scratch`):
+
+| What | Where | Safe to delete |
+|---|---|---|
+| run directories (state, events, report, incidents) | `<HERMES_HOME>/cache/hawkeye/runs/` | yes, when no phase is alive |
+| anything else the tool produces at runtime | `<HERMES_HOME>/cache/hawkeye/` | yes |
+| configuration | `$XDG_CONFIG_HOME/hawkeye/hawkeye.toml` (default `~/.config/hawkeye/hawkeye.toml`) | no — edit it |
+
+```bash
+$ ./bin/hk paths
+config : /home/<user>/.config/hawkeye/hawkeye.toml
+runs   : <HERMES_HOME>/cache/hawkeye/runs
+cache  : <HERMES_HOME>/cache/hawkeye  <- everything hk writes lives here, safe to delete when idle
+```
+
+Resolution order for the config is `$HAWKEYE_V2_CONFIG` → the XDG path → a legacy
+`<HERMES_HOME>/hawkeye-v2/hawkeye.toml` **if it exists** (so an older install keeps its tuning
+instead of silently reverting to defaults). `install.sh` moves that legacy file to the XDG path on
+upgrade, and `hk paths --json` prints both for scripts.
+
+Two rules follow from this, and `tests/selftest.py` enforces them:
+
+* a run started with nothing but `HERMES_HOME` set must leave that directory with exactly one new
+  entry, `cache/` — nothing at the top level (`test_nothing_is_written_at_the_hermes_home_root`);
+* config must never be *required* to live inside `HERMES_HOME`
+  (`test_config_resolution_prefers_xdg_and_keeps_legacy_working`).
+
 ## 8a. Two-process pattern: a producer that works, a watcher that wakes
 
 Some work must continue when nobody is in the chat — an issue triage loop, a nightly audit. A run
