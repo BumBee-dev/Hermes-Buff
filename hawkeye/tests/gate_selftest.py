@@ -110,6 +110,11 @@ def call(mod, task_id: str, **args) -> object:
     return mod.on_pre_tool_call(tool_name="kanban_complete", args=payload)
 
 
+def call_hook(mod, hook_task_id: str, **args) -> object:
+    """Call the hook the way the kernel does: tool args plus its own ``task_id`` kwarg."""
+    return mod.on_pre_tool_call(tool_name="kanban_complete", args=args, task_id=hook_task_id)
+
+
 def main() -> int:
     seed()
     os.environ["HERMES_HOME"] = str(HOME)
@@ -181,6 +186,40 @@ def main() -> int:
           isinstance(call(mod, "t_plain", summary="x", metadata={"command": "pytest -q"}), dict))
     check("block: the result field also counts for (a)",
           call(mod, "t_plain", result="see artifacts", metadata={"artifacts": ["/tmp/b"]}) is None)
+
+    print("\n# card-id resolution (hook kw carries a per-turn id; the env pin carries the card)")
+    os.environ["HAWKEYE_GATE_MODE"] = "block"
+    os.environ["HERMES_KANBAN_TASK"] = "t_contract"      # what bind_worker_context() sets
+    try:
+        verdict = call_hook(mod, "6fd763c2-65a2-413e-b685-b64f27a3aca0",
+                            summary="done", metadata={"artifacts": ["/tmp/x.log"]})
+        line = gate_log()[-1]
+        check("id: the env pin wins over a per-turn hook id",
+              line.get("task_id") == "t_contract" and line.get("task_id_source") == "env",
+              json.dumps(line))
+        check("id: (c) still fires when the hook id is a uuid",
+              any(p.startswith("(c)") for p in line.get("problems") or []), json.dumps(line))
+        check("id: a resolved card is logged as known", line.get("card_known") is True,
+              json.dumps(line))
+        check("id: block still vetoes naming (c)",
+              isinstance(verdict, dict) and "(c)" in verdict.get("message", ""), repr(verdict))
+
+        call(mod, "t_accepted", summary="done", metadata={"artifacts": ["/tmp/x.log"]})
+        line = gate_log()[-1]
+        check("id: an explicit args.task_id wins over the pin",
+              line.get("task_id") == "t_accepted" and line.get("task_id_source") == "args",
+              json.dumps(line))
+
+        os.environ["HERMES_KANBAN_TASK"] = "t_missing"
+        call_hook(mod, "9f1c-uuid", summary="done", metadata={"artifacts": ["/tmp/x.log"]})
+        line = gate_log()[-1]
+        check("id: a card nobody can resolve is logged as unknown",
+              line.get("card_known") is False and line.get("task_id") == "t_missing",
+              json.dumps(line))
+        check("id: an unknown card adds no (c) claim",
+              not any(p.startswith("(c)") for p in line.get("problems") or []), json.dumps(line))
+    finally:
+        os.environ.pop("HERMES_KANBAN_TASK", None)
 
     print("\n# isolation and fault tolerance")
     before = len(gate_log())

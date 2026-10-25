@@ -70,20 +70,55 @@ def on_pre_tool_call(**kwargs: Any) -> Optional[dict]:
 
 
 # ── verdict ───────────────────────────────────────────────────────────────
+def _task_candidates(args: dict, kw: dict) -> list[tuple[str, str]]:
+    """Where the card id can come from, in the order the kernel itself uses.
+
+    ``_default_task_id()`` (tools/kanban_tools.py) resolves an explicit argument first
+    and then the dispatcher's ``HERMES_KANBAN_TASK`` pin. The hook's ``task_id`` is the
+    agent's *effective* task id (``_pre_tool_block_message`` passes
+    ``effective_task_id``), which on v0.22.5 is sometimes a per-turn UUID rather than the
+    card — so it is the last resort here, not the second choice. It used to sit second
+    and shadow the pin, which silently dropped clause (c): the lookup missed, the row
+    came back empty, and "no contract" looked exactly like "no card".
+
+    Every candidate is validated against the board before it is believed (see
+    :func:`_resolve_task`), so a stale pin cannot win either.
+    """
+    return [("args", _text(args.get("task_id"))),
+            ("env", _text(os.environ.get("HERMES_KANBAN_TASK"))),
+            ("hook", _text(kw.get("task_id")))]
+
+
+def _resolve_task(args: dict, kw: dict, board: str) -> tuple[str, str, dict]:
+    """``(task_id, source, row)`` — the first candidate that exists on the board.
+
+    Falls back to the first candidate when none of them resolves, so the log still
+    records what was tried. ``row`` being empty is then reported honestly as
+    ``card_known: false`` instead of being read as "this card has no contract".
+    """
+    candidates = [(src, tid) for src, tid in _task_candidates(args, kw) if tid]
+    primary = (candidates[0][1], candidates[0][0], {}) if candidates else ("", "none", {})
+    for source, task_id in candidates:
+        row = _task_row(board, task_id)
+        if row:
+            return task_id, source, row
+    return primary if candidates else ("", "none", {})
+
+
 def _gate(args: dict, kw: dict) -> Optional[dict]:
     mode = _mode()
     if mode == "off":
         return None
     started = time.perf_counter()
     board = _board()
-    task_id = _text(args.get("task_id")) or _text(kw.get("task_id")) \
-        or _text(os.environ.get("HERMES_KANBAN_TASK"))
-    row = _task_row(board, task_id) if task_id else {}
+    task_id, source, row = _resolve_task(args, kw, board)
     problems = _problems(args, row)
     _log(board, {
         "mode": mode,
         "board": board,
         "task_id": task_id or None,
+        "task_id_source": source,
+        "card_known": bool(row),
         "verdict": "insufficient_evidence" if problems else "ok",
         "problems": problems or None,
         "duration_ms": round((time.perf_counter() - started) * 1000.0, 3),

@@ -260,7 +260,7 @@ Not part of `hk`. It is the **one component that must exist as a plugin**, becau
 | Three modes | `HAWKEYE_GATE_MODE=off / warn / block`, **currently `block` by default** (operator decision, switched 2026-10-25; the env var overrides the default, and rollback is just setting `HAWKEYE_GATE_MODE=warn`) |
 | Criteria | (a) summary/result non-empty; (b) artifacts, or a command plus an output summary; (c) if a contract exists, an acceptance record (waived for `local-only`) |
 | Board lookup | Kernel `kanban_db_path(board)`; without the kernel it falls back to **accepting only an existing named board, never guessing "default"** |
-| Log | `hawkeye-gate.log` next to the board database, one JSON object per line |
+| Log | `hawkeye-gate.log` next to the board database, one JSON object per line. Each line carries `task_id_source` (`args` / `env` / `hook`) and `card_known`, so a resolution problem is visible instead of looking like "this card has no contract" |
 | Cost | About 0.2–7ms per call (measured on a local board database), no network, no LLM |
 
 Install — **per profile, and that is not optional**:
@@ -295,6 +295,14 @@ fix    : ./install.sh --gate --all-profiles
 `HAWKEYE_GATE_MODE` is read from the process environment, so it is inherited by the workers
 the gateway spawns; it is not stored per profile. If you need different modes per profile,
 that is not supported today — the coverage check is the honest control instead.
+
+**Which card is being judged.** The hook's `task_id` argument is the agent's *effective*
+task id, not the card — on v0.22.5 it is sometimes a per-turn UUID. The gate therefore
+resolves the card the way the kernel's own tool path does (`args.task_id` →
+`HERMES_KANBAN_TASK` pin → hook id) and validates every candidate against the board before
+believing it. If nothing resolves, the line says `card_known: false` rather than quietly
+dropping clause (c) — a silent skip there is indistinguishable from a card without a
+contract, which is how it stayed hidden until an outside report caught it (#3).
 
 > Updating an already-enabled plugin is not automatic: copying new files over it leaves the **old module
 > running in the gateway**. Re-run `hermes plugins enable <name>` (that hot-reloads hooks) or restart the gateway.

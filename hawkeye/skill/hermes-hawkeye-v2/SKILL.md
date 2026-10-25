@@ -189,7 +189,12 @@ noise bothers you.
   `HERMES_KANBAN_HOME` or the machine root, because boards are shared across profiles). Any
   test that points `HERMES_HOME` at a fixture and then resolves a board must set
   `HAWKEYE_NO_KERNEL=1`, or it will happily read and write the real board.
-- The board DB path must come from the kernel's `kanban_db_path()`: the default
+- **The gate's hook `task_id` is not the card.** It is the agent's *effective* task id and can
+  be a per-turn UUID, so resolve the card like the kernel does (`args.task_id` →
+  `HERMES_KANBAN_TASK` → hook id) and validate each candidate against the board. An unresolved
+  id must be logged as unknown (`card_known: false`), never read as "no contract" — that
+  silently disables clause (c) while the verdict still looks normal.
+- **The board DB path must come from the kernel's `kanban_db_path()`**: the default
   board lives at `<HERMES_HOME>/kanban.db`, and concatenating
   `boards/<slug>/kanban.db` writes zero events without any error (this is exactly
   what killed v1).
@@ -247,3 +252,9 @@ Reproducible evidence of v1's silent failures lives in `tests/legacy/`: two scri
 using an A/B layout (`<home>/kanban.db` versus `boards/default/`) showing that the
 old version neither wrote events nor enforced criterion (c) on the default board.
 They only run when `HAWKEYE_LEGACY_PLUGIN` points at the old plugin directory.
+
+Release mechanics — proving a new test red against the old code before trusting it green,
+sandbox-testing `install.sh` with a stub CLI, verifying a push through the API instead of
+`raw.githubusercontent`, and the per-claim shape of answering an inbound report — are in
+`references/testing-and-release.md`. The borrowed-kernel surface table (and what an upgrade
+can break) is in `references/kernel-surfaces.md`.
