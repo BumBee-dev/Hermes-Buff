@@ -120,6 +120,17 @@ one model, treat the first two as mandatory.
 
 ## Judgement and correction (dispatch scenarios)
 
+- **Nothing I start may be invisible and immortal.** The user's only view is the chat window, so
+  every background thing (a run, a watcher, a timer) needs two properties stated out loud when it
+  is armed: **how long it lives** (a TTL) and **when it comes back to the chat**. A process that
+  outlives the conversation without saying so is a resource the user cannot see and cannot reason
+  about — that is the failure mode, not the leak itself. Prefer: systemd unit (visible via
+  `systemctl`, dies with the host) for mechanical work, and a bounded `hk run` watcher whose exit
+  wakes this session for notification.
+- **cron cannot address an existing session.** Its delivery targets platforms (webui is not one)
+  and every fire creates its own session. The only mechanism that lands in a specific session is a
+  Hermes-managed background process exiting (phase exit → notify). Choose cron only when nobody
+  needs to see it in this chat.
 - **Run `hk gate-check` before the first dispatch.** The gate plugin is loaded per profile,
   so an install that only touched `default` blocks the orchestrator's own completions and
   lets every worker through. Exit code 1 names the ungated profiles; `install.sh --gate
