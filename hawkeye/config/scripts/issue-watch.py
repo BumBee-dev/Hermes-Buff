@@ -66,8 +66,14 @@ def _state(path: str) -> dict:
     return data
 
 
-def collect(repo: str, token: str, state: dict) -> list[dict]:
-    """Every open issue whose updated_at or last comment moved since the last look."""
+def collect(repo: str, token: str, state: dict, ignore_authors: set[str] | None = None) -> list[dict]:
+    """Every open issue whose updated_at or last comment moved since the last look.
+
+    ``ignore_authors`` suppresses items whose only new activity is by those logins — the
+    maintainer's own replies bump ``updated_at`` on GitHub and would otherwise wake the
+    watcher for its own comments.
+    """
+    ignore = {a.lower() for a in (ignore_authors or set())}
     items: list[dict] = []
     page = 1
     while True:
@@ -81,23 +87,29 @@ def collect(repo: str, token: str, state: dict) -> list[dict]:
             comments = _get("%s/repos/%s/issues/%s/comments?per_page=100" % (API, repo, number), token)
             last_id = comments[-1]["id"] if isinstance(comments, list) and comments else 0
             seen = state.get("issues", {}).get(number) or {}
-            changed = (seen.get("updated_at") != issue.get("updated_at")
-                       or seen.get("last_comment_id") != last_id)
-            if changed:
-                items.append({
-                    "number": issue.get("number"),
-                    "title": issue.get("title"),
-                    "url": issue.get("html_url"),
-                    "author": (issue.get("user") or {}).get("login"),
-                    "created_at": issue.get("created_at"),
-                    "updated_at": issue.get("updated_at"),
-                    "body": issue.get("body") or "",
-                    "new_comments": [c for c in (comments if isinstance(comments, list) else [])
-                                     if c.get("id", 0) > (seen.get("last_comment_id") or 0)],
-                    "first_seen": not seen,
-                    "updated_at_marker": issue.get("updated_at"),
-                    "last_comment_id": last_id,
-                })
+            moved = (seen.get("updated_at") != issue.get("updated_at")
+                     or seen.get("last_comment_id") != last_id)
+            new_comments = [c for c in (comments if isinstance(comments, list) else [])
+                            if c.get("id", 0) > (seen.get("last_comment_id") or 0)]
+            if not moved:
+                continue
+            if new_comments and all(
+                    str((c.get("user") or {}).get("login") or "").lower() in ignore
+                    for c in new_comments):
+                continue                       # only our own replies: not news
+            items.append({
+                "number": issue.get("number"),
+                "title": issue.get("title"),
+                "url": issue.get("html_url"),
+                "author": (issue.get("user") or {}).get("login"),
+                "created_at": issue.get("created_at"),
+                "updated_at": issue.get("updated_at"),
+                "body": issue.get("body") or "",
+                "new_comments": new_comments,
+                "first_seen": not seen,
+                "updated_at_marker": issue.get("updated_at"),
+                "last_comment_id": last_id,
+            })
         if len(batch) < 50:
             break
         page += 1
@@ -111,6 +123,8 @@ def main() -> int:
     parser.add_argument("--mark-seen", action="store_true", help="write the current state back")
     parser.add_argument("--json", action="store_true", help="machine-readable output")
     parser.add_argument("--max-body", type=int, default=4000)
+    parser.add_argument("--ignore-authors", default="",
+                        help="comma-separated logins whose comments are not news (e.g. the maintainer)")
     args = parser.parse_args()
 
     token = _token()
@@ -119,7 +133,8 @@ def main() -> int:
         return 2
     state = _state(args.state) if args.state else {"issues": {}}
     try:
-        items = collect(args.repo, token, state)
+        items = collect(args.repo, token, state,
+                        {a.strip() for a in args.ignore_authors.split(",") if a.strip()})
     except urllib.error.HTTPError as exc:
         print("issue-watch: HTTP %s from the API (%s)" % (exc.code, exc.reason), file=sys.stderr)
         return 2
