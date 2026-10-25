@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+
+# Local runtime state and secrets
+*.log
+.env
+.hawkeye.toml
+
+# Tool runtime directories (state, never code)
+**/runs/
+**/data/
+
+# Editors
+.vscode/
+.idea/
+*.swp
+.DS_Store

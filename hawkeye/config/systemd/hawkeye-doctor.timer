@@ -1,0 +1,14 @@
+[Unit]
+Description=hawkeye-v2 doctor every 2 minutes
+
+[Timer]
+# Deterministic schedule (every even minute). With OnBootSec + OnUnitActiveSec, a manual
+# `systemctl --user start` of the service leaves the timer without a next elapse
+# (measured: NEXT stays empty), which makes verification and troubleshooting harder.
+OnCalendar=*:0/2
+AccuracySec=10s
+Persistent=true
+Unit=hawkeye-doctor.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,42 @@
+# hawkeye-v2 configuration template — copy to hawkeye.toml and edit as needed.
+# Every key is optional; an omitted key falls back to its default value.
+# Usage: hk --config <path>/hawkeye.toml run -- <command...>
+#    or: export HAWKEYE_V2_CONFIG=<path>/hawkeye.toml
+
+# ── Retry policy ────────────────────────────────────────────
+attempts = 3                    # max attempts per run (exhausted → gaveup + incident)
+backoff_seconds = [30.0, 120.0, 300.0]   # wait after the n-th failure; past the end, the last entry repeats
+attempt_timeout_seconds = 3600.0         # hard cap per attempt (timeout = kill the process group, counted as a failure)
+
+# ── Stall detection ─────────────────────────────────────────
+# If the job's output (work.log) stops growing for longer than this, treat it as stalled:
+# kill the process group and retry. Set to 0 to disable this criterion (leaving
+# attempt_timeout as the only backstop).
+stall_seconds = 900.0
+poll_seconds = 2.0              # polling interval of the supervisor phase
+
+# ── Reporting cadence ───────────────────────────────────────
+# The phase exits to report at most once per this interval (so a multi-hour task is never silent).
+report_interval_seconds = 1800.0
+# Prefix of the milestone lines the job prints for itself; the phase merges a batch of
+# milestones into a single report.
+milestone_prefix = "HK-MS "
+milestone_flush_seconds = 120.0  # milestones must be quiet this long to count as one batch (avoids one wake per line)
+
+# ── Board supervision (scenario 1) ──────────────────────────
+kanban_kinds = ["completed", "blocked", "crashed", "timed_out", "gave_up", "reclaimed"]
+kanban_quiet_seconds = 20.0      # batch quiet window: concurrent card completions collapse into one report
+
+# ── Self-health ─────────────────────────────────────────────
+# After each report the agent must call hk lease within this window, otherwise it counts as "nobody home".
+wake_grace_seconds = 900.0
+# doctor declares a phase dead and restarts it when its heartbeat is older than this.
+sup_stale_seconds = 180.0
+# Wake budget per run (kernel watch_patterns allow only 8 hits per session; this keeps ample headroom).
+max_wakes = 6
+# Restart cap per run in doctor: past it, stop restarting and file an incident (guards against restart loops).
+max_restarts = 5
+# Optional external fallback: executed when doctor decides nobody renewed the lease; one line of
+# alert text is passed on stdin.
+# e.g. fallback_command = "hermes send -t <channel>"
+fallback_command = ""

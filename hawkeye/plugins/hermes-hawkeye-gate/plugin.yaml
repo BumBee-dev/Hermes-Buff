@@ -1,0 +1,8 @@
+name: hermes-hawkeye-gate
+version: "1.0.0"
+description: hawkeye-v2 completion gate — veto kanban_complete calls that carry no acceptance evidence (HAWKEYE_GATE_MODE=off|warn|block, default block).
+author: eSun-ws
+hooks:
+  - pre_tool_call
+provides_hooks:
+  - pre_tool_call
