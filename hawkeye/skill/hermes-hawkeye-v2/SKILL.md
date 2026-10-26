@@ -167,6 +167,17 @@ one model, treat the first two as mandatory.
   the work and **re-arms the next window**. Exit-on-detection is not laziness: a wake is a job
   *ending*, so the window is one-shot and re-arming is the wake turn's first obligation. Never leave
   a monitor stopped without saying so in the chat.
+- **Internal records are in the user's language; platform-facing text is not.** A GitHub reply is
+  English because the audience is the upstream maintainers; the ledger entry, the wake summary and the
+  session title are Chinese because the reader is the user. Do not let the outward language leak into
+  the record the user reads — a ledger nobody can read is the same as no ledger. Each entry must carry
+  what changed, the verification result, the commit and the reply link.
+- **A ledger's title must be a name, not a source label.** The WebUI names an untitled child session
+  `<Source> Session` (a hawkeye child therefore reads "Hawkeye Session"), and `hermes sessions rename`
+  only writes `state.db` — the WebUI keeps its own `title` in
+  `<HERMES_HOME>/webui/sessions/sessions/<id>.json` and `_index.json`. Rename all three or the sidebar
+  keeps the auto-generated label: `display_name` + `title` in the DB, then the JSON file and its index
+  row (back the index up first).
 - **A report is a child of the session that asked for the work — never a new window.** The user's
   only view is the sidebar, so an unattended loop that mints its own top-level sessions leaves them
   triaging windows after every night of work. `hk report --parent <sid>` has no "no parent" mode and
@@ -217,7 +228,12 @@ one model, treat the first two as mandatory.
   `./install.sh --gate --all-profiles`, which needs the very CLI that is missing. Keep the fail-closed
   exit code and fix the sentence: distinguish "could not determine" from "missing" — name the missing
   CLI and the override (`HAWKEYE_HERMES_BIN`), and print the install hint only for rows whose files are
-  actually absent, with a test for **both** branches so the hint cannot silently disappear.
+  actually absent, with a test for **both** branches so the hint cannot silently disappear. Gate the
+  diagnosis on the **same predicate as the verdict**: an override that is set but not executable (stale
+  path after a reinstall, or no `+x`) still makes "can we ask the CLI?" false, and a renderer that only
+  checks "the variable is non-empty" brings the old hint back. One `_cli_usable()` (file **and** `X_OK`)
+  answers both, and the wording follows the cause — "is set but not executable; unset it to fall back to
+  PATH" is a different sentence from "no CLI on PATH", and only the second one may mention `PATH` at all.
 - Judge against the acceptance criteria written into the card body, never against
   the subagent's self-assessment.
 - **First real dispatch: one card, default profile, whole chain.** Only after you
@@ -248,6 +264,15 @@ The `--all` is not decoration: bare `hk status` prints `(no runs)` for a run tha
 no attention, which reads as "the watcher vanished". `hk run` itself never returns — it supervises in
 the foreground, so a start without `background=True` hits the tool timeout, and the timeout kills the
 phase it was waiting on; remove the half-made run directory before re-arming.
+
+**A run id is terminal, so a new window takes a new id.** `hk run --id <existing>` refuses with
+`run already exists: <id>` — measured on a run that had exited normally and on one that was stopped —
+so "stop it and start it again with the same id" does not restart anything, and a monitor left that
+way stays down while looking armed. Re-arming therefore has two steps, in this order: `hk lease --run
+<previous-id>` (the report that woke you is what gets consumed; without the lease the doctor files
+`agent_unreachable` on a report nobody acknowledged), then start `<base>-<n+1>` with `n` read from a
+counter file next to the signal. Keeping the finished windows is the point, not a leak — `hk status
+--all` becomes the audit trail and `hk gc --days 7` prunes it.
 
 `hk stop` kills two process groups, not one: the `hk job` wrapper and the command it
 spawned with `start_new_session=True` (the command is its own group leader, so killing
