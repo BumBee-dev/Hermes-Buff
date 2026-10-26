@@ -103,6 +103,22 @@ print(best)
   LEDGER_MAX=$out
 }
 
+# `round.closed` is read by three verbs and is the only memory of the highest written round once a
+# message is summarised, so it gets the same rule as the counter: absent or empty means "never
+# written" (0), present-but-unparsable means refuse. The two files describing one fact cannot answer
+# the same damage differently.
+_read_closed() {
+  CLOSED_VALUE=0
+  [ -f "$CLOSED" ] || return 0
+  local n
+  n=$(tr -d '[:space:]' < "$CLOSED" 2>/dev/null)
+  [ -z "$n" ] && return 0
+  case "$n" in
+    ''|*[!0-9]*) _die "round.closed is not a non-negative integer (\"$n\"); refusing to renumber" ;;
+  esac
+  CLOSED_VALUE=$n
+}
+
 _lock() { exec 9>>"$LOCK"; flock 9; }
 _unlock() { flock -u 9; exec 9>&-; }
 
@@ -113,9 +129,7 @@ _alloc() {
   _read_counter
   local lmax closed
   _read_ledger_max; lmax=$LEDGER_MAX
-  closed=0
-  [ -f "$CLOSED" ] && closed=$(tr -d '[:space:]' < "$CLOSED" 2>/dev/null)
-  case "$closed" in ''|*[!0-9]*) closed=0 ;; esac
+  _read_closed; closed=$CLOSED_VALUE
   # `closed` counts: it is the only record that survives a summarised message losing its heading, and
   # an allocator that forgets it rewinds into rounds the ledger already has (reported: pinned write of
   # 20, ledger trimmed, `next` -> 7).
@@ -174,9 +188,7 @@ case "${1:-}" in
       case "$p" in ''|*[!0-9]*) p=0 ;; esac
       # A pin that `record` would refuse must not be reported as if it were writable: peek answers
       # "which round is next", and the answer is the pin only when the pin is usable.
-      closed=0
-      [ -f "$CLOSED" ] && closed=$(tr -d '[:space:]' < "$CLOSED" 2>/dev/null)
-      case "$closed" in ''|*[!0-9]*) closed=0 ;; esac
+      _read_closed; closed=$CLOSED_VALUE
       _read_ledger_max
       floor=$closed
       [ "$LEDGER_MAX" -gt "$floor" ] && floor=$LEDGER_MAX
@@ -190,9 +202,7 @@ case "${1:-}" in
     else
       # A consumed pin leaves `closed` ahead of the counter, so peeking the counter alone reported a
       # number rounds behind the ledger (14 in the reported case). Same fact, same three sources.
-      closed=0
-      [ -f "$CLOSED" ] && closed=$(tr -d '[:space:]' < "$CLOSED" 2>/dev/null)
-      case "$closed" in ''|*[!0-9]*) closed=0 ;; esac
+      _read_closed; closed=$CLOSED_VALUE
       _read_ledger_max
       [ "$closed" -gt "$CURRENT" ] && CURRENT=$closed
       [ "$LEDGER_MAX" -gt "$CURRENT" ] && CURRENT=$LEDGER_MAX
@@ -222,9 +232,7 @@ case "${1:-}" in
     [ -f "$body" ] || _die "no such body: $body"
     _lock
     _read_counter
-    closed=0
-    [ -f "$CLOSED" ] && closed=$(tr -d '[:space:]' < "$CLOSED" 2>/dev/null)
-    case "$closed" in ''|*[!0-9]*) closed=0 ;; esac
+    _read_closed; closed=$CLOSED_VALUE
     pinned=0
     [ -f "$PINNED" ] && pinned=$(tr -d '[:space:]' < "$PINNED" 2>/dev/null)
     case "$pinned" in ''|*[!0-9]*) pinned=0 ;; esac

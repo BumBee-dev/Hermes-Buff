@@ -1367,6 +1367,40 @@ def test_ledger_round_allocator_is_shipped_and_serialised() -> None:
           still.stdout.strip() == "20" and "will refuse it" in (still.stderr or ""),
           "peek=%s %s" % (still.stdout.strip(), (still.stderr or "")[-120:]))
 
+    # `round.closed` describes the same fact as the counter and carries the only memory of a summarised
+    # round, so it follows the same rule: absent or empty means never written, present-but-unparsable
+    # refuses. Parsing it with a silent 0 produced exactly the duplicate it exists to prevent.
+    corrupt_home = BASE / "ledger-corrupt-closed"
+    corrupt_home.mkdir()
+    con = sqlite3.connect(str(corrupt_home / "state.db"))
+    con.execute("create table messages (id integer primary key, session_id text, content text)")
+    for n in range(1, 7):
+        con.execute("insert into messages(session_id, content) values (?, ?)",
+                    ("led", "## 第 %d 轮 · heading" % n))
+    con.commit(); con.close()
+    (corrupt_home / "round.current").write_text("6\n")
+    (corrupt_home / "round.closed").write_text("2O\n")      # letter O, not zero
+    cstub = corrupt_home / "stub-hk"
+    cstub.write_text("#!/bin/bash\nexit 0\n")
+    cstub.chmod(0o755)
+    cenv = {**ENV, "IW_STATE_DIR": str(corrupt_home), "HERMES_HOME": str(corrupt_home),
+            "IW_LEDGER": "led", "IW_HK": str(cstub)}
+
+    def cs(*args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(["bash", str(script), *args], capture_output=True, text=True,
+                              env=cenv, timeout=60)
+
+    bad_closed = [cs("peek"), cs("next"), cs("record", "x", str(body))]
+    check("ledger-round: a corrupt closed file is refused by every reader",
+          all(r.returncode == 2 for r in bad_closed) and
+          all("round.closed is not a non-negative integer" in (r.stderr or "") for r in bad_closed),
+          str([r.returncode for r in bad_closed]))
+
+    (corrupt_home / "round.closed").write_text("")
+    empty_closed = cs("peek")
+    check("ledger-round: an empty closed file means never written, not corruption",
+          empty_closed.returncode == 0, "rc=%s %s" % (empty_closed.returncode, (empty_closed.stderr or "")[-120:]))
+
     # The anchor requires one of the two documented forms: with both prefixes optional, a body
     # paragraph starting at column 0 with "第 12 轮 · …" counted as a heading and inflated the maximum.
     bare_home = BASE / "ledger-bare-line"
