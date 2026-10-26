@@ -222,9 +222,9 @@ script that never goes through the agent or the model; the only thing that burns
 
 ### Watching the issue tracker (maintenance only)
 
-`config/scripts/issue-watch.py` polls a repository's open issues and prints only what changed
-since the last look. It is not needed to run hawkeye — it exists so the maintenance loop can be
-driven by a scheduled agent turn that costs nothing while nothing happens.
+`config/scripts/issue-watch.py` polls a repository's issues — every state, closed ones included —
+and prints only what changed since the last look. It is not needed to run hawkeye; it exists so the
+maintenance loop can be driven by a scheduled agent turn that costs nothing while nothing happens.
 
 ```bash
 GITHUB_TOKEN=… python3 config/scripts/issue-watch.py --repo OWNER/NAME --state /path/state.json
@@ -233,7 +233,24 @@ GITHUB_TOKEN=… python3 config/scripts/issue-watch.py --repo OWNER/NAME --state
 #   exit 2  error (no token, HTTP failure)
 #   --mark-seen   advance the state after the items have been handled
 #   --json        machine-readable
+#   --ignore-authors LOGINS   replies by these logins are not news (your own)
 ```
+
+**Closed issues are watched, and only a reply makes them news.** Querying `state=open` looks
+thorough and is not: on a repository where every issue eventually closes, the reporter's follow-up —
+the one that says "confirmed" or "still broken" — arrives on a closed issue and would be invisible.
+Measured here: a real confirmation reply sat unseen for hours while the watcher reported "nothing
+new". The rule is per state, because the two mean different things:
+
+| Issue state | What counts as news |
+|---|---|
+| open | a new issue, an edited body, or any new comment |
+| closed | **only** a new comment — closing is your own act |
+| closed, never seen before | nothing: that is history, not an event |
+
+`--mark-seen` therefore records a marker for every issue it examined, not just the ones it reported.
+Without that, a closed issue with no marker looks identical to "closed since the beginning", and its
+first later reply would arrive together with its entire comment history.
 
 Output is deterministic on purpose: same state + same issues = same bytes, so a scheduler can
 diff it and skip the agent entirely when nothing changed (measured here: an idle tick with a

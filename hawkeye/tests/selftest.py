@@ -889,6 +889,100 @@ def test_report_creates_a_child_session() -> None:
           bad.returncode != 0 and total == "2", "rc=%s sessions=%s" % (bad.returncode, total))
 
 
+def test_interpreter_probe_ignores_a_hostile_pythonpath() -> None:
+    """The probe must judge the interpreter, not the caller's shell.
+
+    Reported upstream against `f4bbaea`: a `PYTHONPATH` containing a `sitecustomize` that reports an
+    old version made *every* candidate look unusable, `find()` returned None, and a host with a
+    perfectly good Hermes runtime reported "found nothing usable". Cron wrappers and CI steps are
+    exactly where a stray PYTHONPATH lives, so the fix is to launch the probe with the caller's
+    environment minus the variables that change who the interpreter is.
+    """
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "hk_interp", str(Path(__file__).resolve().parents[1] / "bin" / "_hk_interp.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    fake = BASE / "hostile-pythonpath"
+    fake.mkdir()
+    (fake / "sitecustomize.py").write_text(
+        "import sys\nsys.version_info = (3, 7, 0, 'final', 0)\n")
+
+    # Control: the fake really does skew version reporting in a child that inherits PYTHONPATH,
+    # otherwise the assertions below would pass for the wrong reason.
+    skewed = subprocess.run(
+        [sys.executable, "-c", "import sys;print('%d.%d' % sys.version_info[:2])"],
+        capture_output=True, text=True, env={**os.environ, "PYTHONPATH": str(fake)}, timeout=60)
+    check("interp probe: the hostile PYTHONPATH really skews a child that inherits it",
+          skewed.stdout.strip() == "3.7", skewed.stdout.strip() + (skewed.stderr or "")[-120:])
+
+    prev = os.environ.get("PYTHONPATH")
+    os.environ["PYTHONPATH"] = str(fake)
+    try:
+        check("interp probe: a usable interpreter stays usable under a hostile PYTHONPATH",
+              mod.usable(sys.executable) is True, "usable(%s) -> False" % sys.executable)
+        check("interp probe: find() still returns a candidate",
+              bool(mod.find()), "find() returned None")
+    finally:
+        if prev is None:
+            os.environ.pop("PYTHONPATH", None)
+        else:
+            os.environ["PYTHONPATH"] = prev
+
+
+def test_issue_watch_reports_replies_on_closed_issues() -> None:
+    """A reporter's follow-up lands on a *closed* issue, so `state=open` hides most conversation.
+
+    This is the miss that made a real reply invisible: #14 was confirmed and closed, the reporter
+    answered again on the closed issue, and the watcher reported "nothing new" for hours. Open
+    issues keep their old rule (any movement is news); a closed issue is news only when somebody
+    replied, because closing is the maintainer's own act and a never-seen closed issue is history.
+    """
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "issue_watch", str(Path(__file__).resolve().parents[1] / "config" / "scripts" / "issue-watch.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    closed_with_reply = {"number": 14, "state": "closed", "title": "t", "html_url": "u",
+                         "user": {"login": "reporter"}, "created_at": "a", "updated_at": "b",
+                         "body": ""}
+    check("issue-watch: a closed issue with a new reply is news",
+          mod._is_news(closed_with_reply, {"updated_at": "older"}, [{"id": 2}]) is True)
+    check("issue-watch: a closed issue nobody replied to is not news",
+          mod._is_news(closed_with_reply, {"updated_at": "older"}, []) is False)
+    check("issue-watch: a never-seen closed issue is history, not news",
+          mod._is_news(closed_with_reply, {}, []) is False)
+    check("issue-watch: a never-seen open issue is news",
+          mod._is_news({**closed_with_reply, "state": "open"}, {}, []) is True)
+
+    # Behaviour, not source: drive collect() with a fake API where the only closed issue moved.
+    issues = [closed_with_reply, {**closed_with_reply, "number": 7, "state": "open"}]
+    comments = {14: [{"id": 1, "user": {"login": "eSun-ws"}}, {"id": 2, "user": {"login": "reporter"}}],
+                7: [{"id": 1, "user": {"login": "eSun-ws"}}]}
+
+    def fake_get(url: str, token: str):
+        if "/issues?" in url:
+            return issues if "page=1" in url else []
+        number = int(url.split("/issues/")[1].split("/")[0])
+        return comments[number]
+
+    real_get = mod._get
+    mod._get = fake_get
+    try:
+        state = {"issues": {"14": {"updated_at": "older", "last_comment_id": 1},
+                            "7": {"updated_at": closed_with_reply["updated_at"], "last_comment_id": 1}}}
+        items = mod.collect("o/r", "tok", state, {"esun-ws"})
+    finally:
+        mod._get = real_get
+    numbers = [i["number"] for i in items]
+    check("issue-watch: the closed issue's reply reaches the report", 14 in numbers, str(numbers))
+    check("issue-watch: an untouched open issue stays quiet", 7 not in numbers, str(numbers))
+    check("issue-watch: the reply is carried in new_comments",
+          bool(items) and any(c["id"] == 2 for c in items[0]["new_comments"]), str(items[:1])[:200])
+
+
 def test_report_can_append_to_one_ledger_child() -> None:
     """A recurring producer must be able to keep writing into the *same* child session.
 
@@ -1824,6 +1918,8 @@ def main() -> int:
                  test_per_run_report_interval_overrides_the_host_setting,
                  test_state_writes_cannot_resurrect_a_finished_run,
                  test_report_creates_a_child_session,
+                 test_interpreter_probe_ignores_a_hostile_pythonpath,
+                 test_issue_watch_reports_replies_on_closed_issues,
                  test_report_can_append_to_one_ledger_child,
                  test_kernel_branch_resolves_board_paths,
                  test_crash_loop_is_bounded, test_gc_keeps_incidents, test_status_all):

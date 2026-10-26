@@ -59,7 +59,26 @@ def candidates(env=None):
     return unique
 
 
-def usable(path, timeout=15):
+PROBE_ENV_STRIP = ("PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP")
+
+
+def _probe_env(env=None):
+    """Environment for the probe child: the caller's, minus the variables that change who the
+    interpreter *is*.
+
+    Measured on a host where the caller exported a PYTHONPATH holding a sitecustomize that reported
+    python 3.7: every candidate -- including /usr/bin/python3 and Hermes' own tools python -- was
+    judged unusable and ``find()`` returned None, so a perfectly good host reported "found nothing
+    usable". The verdict has to be about the interpreter, not about the shell that invoked hk, and
+    cron/CI wrappers are exactly where a stray PYTHONPATH lives.
+    """
+    base = dict(os.environ if env is None else env)
+    for key in PROBE_ENV_STRIP:
+        base.pop(key, None)
+    return base
+
+
+def usable(path, timeout=15, env=None):
     """True when *path* is an executable interpreter that satisfies MIN_VERSION.
 
     Launched rather than inspected on purpose: a broken symlink, a venv whose base interpreter was
@@ -69,7 +88,8 @@ def usable(path, timeout=15):
         return False
     try:
         proc = subprocess.run([path, "-c", PROBE], stdout=subprocess.DEVNULL,
-                              stderr=subprocess.DEVNULL, timeout=timeout)
+                              stderr=subprocess.DEVNULL, timeout=timeout,
+                              env=_probe_env(env))
     except (OSError, subprocess.SubprocessError):
         return False
     return proc.returncode == 0

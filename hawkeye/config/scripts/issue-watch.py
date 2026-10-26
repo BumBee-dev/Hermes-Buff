@@ -66,37 +66,72 @@ def _state(path: str) -> dict:
     return data
 
 
-def collect(repo: str, token: str, state: dict, ignore_authors: set[str] | None = None) -> list[dict]:
-    """Every open issue whose updated_at or last comment moved since the last look.
+def _is_news(issue: dict, seen: dict, new_comments: list[dict]) -> bool:
+    """Does this issue warrant a wake?
+
+    Open issues: any movement counts (a new issue, an edited body, a new comment). Closed issues:
+    only a *reply* counts. Closing is the maintainer's own act, and a closed issue that was never
+    seen before is history, not news -- reporting it would dump every old comment the first time the
+    state file is missing.
+
+    This distinction is the fix for a real miss: the watcher used to query ``state=open``, so a
+    reporter's follow-up on a closed issue was invisible. On a repo where every issue ends up
+    closed, that is most of the conversation.
+    """
+    if not new_comments:
+        return issue.get("state") == "open" and not seen
+    return True
+
+
+def collect(repo: str, token: str, state: dict, ignore_authors: set[str] | None = None,
+            track: bool = False) -> list[dict]:
+    """Issues with movement since the last look, open ones and replies on closed ones.
 
     ``ignore_authors`` suppresses items whose only new activity is by those logins — the
     maintainer's own replies bump ``updated_at`` on GitHub and would otherwise wake the
     watcher for its own comments.
+
+    ``track`` records a marker for every issue examined (not only the reported ones), which is what
+    makes "closed issue, never seen" safe to treat as history: the marker exists from the first
+    pass, so a later reply is genuinely new.
     """
     ignore = {a.lower() for a in (ignore_authors or set())}
     items: list[dict] = []
     page = 1
     while True:
-        batch = _get("%s/repos/%s/issues?state=open&per_page=50&page=%d" % (API, repo, page), token)
+        # state=all, newest first: a closed issue is where a reporter's follow-up lands, and paging
+        # oldest-first over a long history would burn the rate limit before reaching it.
+        batch = _get("%s/repos/%s/issues?state=all&sort=updated&direction=desc&per_page=50&page=%d"
+                     % (API, repo, page), token)
         if not isinstance(batch, list) or not batch:
             break
         for issue in batch:
             if issue.get("pull_request"):
                 continue                       # PRs have their own review flow
             number = str(issue.get("number"))
+            seen = state.get("issues", {}).get(number) or {}
+            if seen and seen.get("updated_at") == issue.get("updated_at") \
+                    and not seen.get("last_comment_id"):
+                continue                       # untouched and provably comment-free
+            if seen and seen.get("updated_at") == issue.get("updated_at"):
+                # Nothing moved at all: no comment to fetch. One request saved per quiet issue per
+                # poll, which on a 14-issue repo is the difference between 15 requests and 1+.
+                continue
             comments = _get("%s/repos/%s/issues/%s/comments?per_page=100" % (API, repo, number), token)
             last_id = comments[-1]["id"] if isinstance(comments, list) and comments else 0
-            seen = state.get("issues", {}).get(number) or {}
-            moved = (seen.get("updated_at") != issue.get("updated_at")
-                     or seen.get("last_comment_id") != last_id)
             new_comments = [c for c in (comments if isinstance(comments, list) else [])
                             if c.get("id", 0) > (seen.get("last_comment_id") or 0)]
-            if not moved:
-                continue
+            if track:
+                state.setdefault("issues", {})[number] = {
+                    "updated_at": issue.get("updated_at"),
+                    "last_comment_id": last_id,
+                }
             if new_comments and all(
                     str((c.get("user") or {}).get("login") or "").lower() in ignore
                     for c in new_comments):
                 continue                       # only our own replies: not news
+            if not _is_news(issue, seen, new_comments):
+                continue
             items.append({
                 "number": issue.get("number"),
                 "title": issue.get("title"),
@@ -134,7 +169,8 @@ def main() -> int:
     state = _state(args.state) if args.state else {"issues": {}}
     try:
         items = collect(args.repo, token, state,
-                        {a.strip() for a in args.ignore_authors.split(",") if a.strip()})
+                        {a.strip() for a in args.ignore_authors.split(",") if a.strip()},
+                        track=args.mark_seen)
     except urllib.error.HTTPError as exc:
         print("issue-watch: HTTP %s from the API (%s)" % (exc.code, exc.reason), file=sys.stderr)
         return 2
@@ -161,11 +197,8 @@ def main() -> int:
                 print(text[: args.max_body] + ("\n  …(truncated)" if len(text) > args.max_body else ""))
 
     if args.mark_seen and args.state:
-        for item in items:
-            state.setdefault("issues", {})[str(item["number"])] = {
-                "updated_at": item["updated_at_marker"],
-                "last_comment_id": item["last_comment_id"],
-            }
+        # collect(track=True) already wrote a marker for every issue it looked at; writing only the
+        # reported ones is what made "closed issue, never seen" indistinguishable from history.
         os.makedirs(os.path.dirname(os.path.abspath(args.state)) or ".", exist_ok=True)
         tmp = args.state + ".tmp"
         with open(tmp, "w", encoding="utf-8") as handle:

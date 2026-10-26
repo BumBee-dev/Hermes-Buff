@@ -150,6 +150,13 @@ one model, treat the first two as mandatory.
   about — that is the failure mode, not the leak itself. Prefer: systemd unit (visible via
   `systemctl`, dies with the host) for mechanical work, and a bounded `hk run` watcher whose exit
   wakes this session for notification.
+- **Deleting a session means two stores, not one.** The WebUI keeps its own copy of every session
+  under `$HERMES_HOME/webui/sessions/sessions/<id>.json` plus a row in that directory's
+  `_index.json`; the kernel's `SessionDB.delete_sessions()` only clears `state.db`. Delete half and
+  the session survives as a ghost row in the sidebar that opens nothing — the user sees a window you
+  reported as deleted, which is worse than not deleting it. When removing a child session, remove the
+  WebUI file and its index row too (back the index up first), then check `file / index / state.db`
+  separately before saying it is gone.
 - **A recurring producer writes into one ledger, not one child per cycle.** `hk report --parent`
   creates a child; `hk report --into <sid>` appends to an existing one, stamped per entry. A poll
   loop that reported each cycle as a fresh child would rebuild the sidebar clutter one level down.
@@ -222,6 +229,11 @@ $P/bin/hk stop --run <id>       # stop the run AND the command it started
 $P/bin/hk gc --days 7           # drop old finished runs (runs with an incident are kept)
 ```
 
+The `--all` is not decoration: bare `hk status` prints `(no runs)` for a run that is alive and needs
+no attention, which reads as "the watcher vanished". `hk run` itself never returns — it supervises in
+the foreground, so a start without `background=True` hits the tool timeout, and the timeout kills the
+phase it was waiting on; remove the half-made run directory before re-arming.
+
 `hk stop` kills two process groups, not one: the `hk job` wrapper and the command it
 spawned with `start_new_session=True` (the command is its own group leader, so killing
 only the wrapper leaves an orphan that keeps working with nobody supervising it). After
@@ -291,7 +303,9 @@ default, an explicit `0` means "no grace").
 Inbound reports on the public repo are watched by a **bounded in-session watcher**:
 `hk run --id <id> -- <script>` where the script polls `issue-watch.py --json` every few minutes
 (deterministic and read-only, so an unchanged repo produces an identical tick — 0 tokens) and
-prints one milestone line on news **or** on TTL expiry. The wake then lands in the chat that
+prints one milestone line on news **or** on TTL expiry. `templates/ledger-watch.sh` is that loop with
+the four rules already baked in (heartbeat, record-then-exit, seen-state, explicit poll-failure
+lines); copy it and replace the poll command and the ledger id. The wake then lands in the chat that
 armed it, and the window always closes with a question instead of going quiet. cron is only for
 "nobody is here to see it": every fire opens a NEW session window and cannot deliver into an
 existing one. Four rules that cost the loop silently:
@@ -405,6 +419,12 @@ existing one. Four rules that cost the loop silently:
   `doctor --fix` has run, so hand-writing the file and asserting on `status` tests the *open* case and looks like the
   fix failing. Drive the same writer the reporter did, and choose the run shape on purpose: a running run reaches
   `gc` as `not finished`, a finished one as `has incident` — wrong shape, wrong assertion.
+- **A tool that writes into a session has to stamp activity on it.** `append_message` bumps
+  `message_count` and leaves `last_activity_at` NULL, so a report-only child carries no time and reads
+  as "never used" everywhere activity is displayed or sorted — what the user describes as "the session
+  is empty / I cannot see it". Call `touch_session_activity()` after the write and, when asked to prove
+  no new window appeared, read `parent_session_id` in `state.db` rather than the sidebar caption (the
+  caption is derived from `source`). Recipes in `references/in-session-watch.md`.
 - Wake turns advance on their own (measured on the WebUI: no page refresh needed).
 - Use `OnCalendar=*:0/2` rather than `OnBootSec` + `OnUnitActiveSec`: after a manual
   `systemctl --user start` of the service, the latter stops scheduling the next
