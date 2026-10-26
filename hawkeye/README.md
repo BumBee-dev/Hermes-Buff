@@ -588,3 +588,13 @@ session it was reporting into is restarting. That case is covered: once
 `wake_grace_seconds` (900 by default) passes with no renewal, `hk doctor` files
 `agent_unreachable` and `fallback_command` is the out-of-band alert. The job itself is
 detached and keeps running throughout the upgrade.
+
+## Acknowledgements
+
+- **[@BumBee-dev](https://github.com/BumBee-dev)** -- filed most of the defects fixed in this
+  project's first week (#1-#11), sent the first pull request, and re-verified every fix on a
+  four-profile host with red-before/green-after runs at named commits. Several of the tests here
+  exist because of that loop: a stop that started another attempt, a sweep that deleted a report
+  before it was delivered, an install that rewrote the host's systemd units, a skill that shipped
+  pointers to files it did not ship, and a test that could not fail. Reporting a test-that-cannot-
+  fail with a worktree reverting one line is the part most reviewers never get.

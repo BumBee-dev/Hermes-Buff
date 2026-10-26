@@ -25,7 +25,8 @@ stall_seconds = 900.0
 retention_days = 7.0
 # A finished run whose report has not been acknowledged yet is kept for this long, because the
 # wake is queued and delivered after the run ends: sweeping the directory first makes the
-# notification point at nothing.
+# notification point at nothing. The window is measured from finished_at, not from the report's
+# own timestamp.
 delivery_grace_seconds = 300.0
 
 poll_seconds = 2.0              # polling interval of the supervisor phase

@@ -101,6 +101,11 @@ DEFAULT_DELIVERY_GRACE = 300.0
 def delivery_grace(cfg: dict) -> float:
     """The one default for how long an undelivered report protects its run from the sweep.
 
+    Measured from ``finished_at``, not from ``last_report_at``: a run that finished hours ago and
+    reported seconds ago is pruned by both callers. That is deliberate -- the window exists to cover
+    the delivery of the *final* report, and a run whose report was never consumed gets an incident,
+    which keeps its directory past the window anyway.
+
     gc and doctor used to default this key to different numbers (300 and 0), so the sweep was the
     permissive side of a two-answer question. It only looked safe because config.load() merges
     DEFAULTS into every config: any caller handing the sweep a hand-built dict got the old split.

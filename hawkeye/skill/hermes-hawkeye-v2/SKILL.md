@@ -157,6 +157,16 @@ one model, treat the first two as mandatory.
   through the watcher. Detached conversations are a decision the person makes in the UI, not
   something a background job decides for them. Mechanics and the verification query are in
   `references/in-session-watch.md`.
+- **A decision waits in a file, not in the session todo list.** The WebUI todo list is per-session,
+  written only by the agent (the UI has read paths, no write endpoint) and visible only in that
+  session — which is the right default, because a list shared across projects is how a decision about
+  one codebase gets applied to another. It is therefore a *view*, never the store: items that must
+  survive the session that produced them go to a durable file (`<HERMES_HOME>/cache/hawkeye/inbox/
+  decisions.jsonl`, one id/why/options/default per entry), which is mirrored into the session's todo
+  list for the person to read when they are back, and answered by id. Two rules: a default makes
+  answering cheap but **never executes on its own** (anything safe to decide alone does not belong in
+  the inbox), and nothing auto-answers. Recipe and the read-only facts in
+  `references/in-session-watch.md`.
 - **cron cannot address an existing session.** Its delivery targets platforms (webui is not one)
   and every fire creates its own session. The only mechanism that lands in a specific session is a
   Hermes-managed background process exiting (phase exit → notify). Choose cron only when nobody
@@ -218,6 +228,17 @@ starting another attempt and without emitting a report: the wake a stop is meant
 stays unspent, and the verdict stays `stopped` instead of being rewritten as `gaveup`. If a
 stop returns 0 and the run later reports `attempts_exhausted`, that is this contract broken.
 
+**Re-reading is only half of it: the write side must be atomic too.** `phase._set()` used to ask
+"has anybody finished this run?" and then write, as two steps; a stop landing between them was
+overwritten by the phase's in-memory copy, so the loop started another attempt, timed out, and
+reported a run the operator had cancelled (event order: `attempt_failed → run_stopped →
+attempt_start → gaveup → report`, `finish_reason=gaveup`). Take the same `store.file_lock()`
+`cmd_stop` uses around the whole check-and-write, and refuse **only progress writes** — a phase
+that is itself finishing still has to write its last counters, because the report's own counters
+land *after* `_finish`, and a blanket refusal silently drops `reports` and `report.md` from every
+successful run. Any change here needs both halves tested: a verdict that survives a concurrent
+writer, and a normal run that still counts its report.
+
 Two things a stop deliberately leaves behind: `state.json` keeps `job_pid` and the run
 directory keeps `job.pid`, so a stopped run can still name what it stopped -- a "stopped"
 that cannot name its own command has the same unaccountable shape as the orphan reports
@@ -249,7 +270,13 @@ journald records one line per sweep; silence it with `StandardOutput=null` if th
 noise bothers you.
 
 `runs/` only grows — run `hk gc --days 7` periodically (`--dry-run` to look first,
-`--force` to include runs that carry an incident).
+`--force` to include runs that carry an incident). The doctor sweep prunes on the same schedule
+(`retention_days`, incidents kept as evidence), so **"may this directory go?" needs exactly one
+predicate and one default**: `hk gc` and `doctor._prune_old_runs` once read `delivery_grace_seconds`
+with different fallbacks (300 vs 0), which made the sweep the permissive side for hand-built config
+dicts. Both now call one helper, and the delivery grace itself has one meaning — a finished run whose
+report has not been acknowledged yet survives the sweep (`300 s` by default, `null`/absent means the
+default, an explicit `0` means "no grace").
 
 ### Issue maintenance loop (repo hygiene, separate from `hk runs`)
 
@@ -340,10 +367,11 @@ existing one. Four rules that cost the loop silently:
 - But **replacing the files of an already-enabled plugin does not reload it** — the
   gateway keeps running the old module. `disable` then `enable` to hot-load again;
   the copy inside the WebUI process needs a WebUI restart.
-- **A test can pass because the code it drives never ran**, and a redirected install can rewrite the
-  host's units. Both live in `references/testing-and-release.md` (child-process liveness assertion,
-  revert-callers grep, and which flags actually redirect a unit dir); read it before touching the
-  race tests or `install.sh`.
+- **A test can pass because the code it drives never ran**, a redirected install can rewrite the
+  host's units, and a load harness can "prove" a race fixed without ever entering the window. All
+  three live in `references/testing-and-release.md` (child-process liveness assertion, revert-callers
+  grep, the verdict-integrity criterion, how to report a harness that cannot reproduce, and where a
+  redirect's baseline must come from); read it before touching the race tests or `install.sh`.
 - **"No leftover process" needs a sampling loop, not one `pgrep` snapshot.** A green suite can leave a
   phase alive for a sub-second window right after the run directory disappears, so a snapshot taken
   immediately after exit reports a leak and a snapshot a second later reports it fixed — same code,

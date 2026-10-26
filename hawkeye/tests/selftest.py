@@ -1390,12 +1390,11 @@ def test_set_cannot_overwrite_a_stop_verdict() -> None:
 
 
 def test_the_sweep_and_gc_share_one_delivery_grace() -> None:
-    """#10(a): one key, one default, one reader.
+    """#10(a): one key, one default, one reader -- measured on a root of its own.
 
-    `hk gc` defaulted the delivery grace to 300 and `doctor --fix` to 0, so the two sweepers could
-    disagree about the same run. It only looked harmless because config.load() merges DEFAULTS into
-    every config dict; a hand-built dict (an embedder, a test) got the split back. Both now read
-    store.delivery_grace(), and nothing else in the library may read that key on its own.
+    The test prunes, so it must not run in the shared run root: `gc --days 0.0007 --force` there
+    swept the finished fixtures that `status` asserts on, and the failure looked like a status bug
+    rather than a test that deleted its neighbours' data.
     """
     import importlib
     lib = str(Path(__file__).resolve().parents[1] / "lib")
@@ -1407,11 +1406,33 @@ def test_the_sweep_and_gc_share_one_delivery_grace() -> None:
     check("grace: a configured value wins", store.delivery_grace({"delivery_grace_seconds": 60}) == 60.0)
     check("grace: a null value falls back instead of raising",
           store.delivery_grace({"delivery_grace_seconds": None}) == 300.0)
-
     owners = [p.name for p in (Path(lib) / "hawkeye").glob("*.py")
               if '"delivery_grace_seconds"' in p.read_text() or "'delivery_grace_seconds'" in p.read_text()]
     check("grace: only store.py and config.py name the key", sorted(owners) == ["config.py", "store.py"],
           str(owners))
+
+    conf = cfg("sweep", retention_days=0.0007, delivery_grace_seconds=300)   # ~60s retention
+    sweep_root = BASE / "sweep-runs"
+    sweep_root.mkdir()
+    rd = sweep_root / "sweep-undelivered"
+    rd.mkdir()
+    now = time.time()
+    (rd / "meta.json").write_text(json.dumps({"kind": "exec", "entry": "/bin/true"}))
+    (rd / "state.json").write_text(json.dumps({
+        "finished": True, "finished_at": now - 120, "reports": 1, "last_report_at": now - 120}))
+    (rd / "lease.json").write_text(json.dumps({"agent_seen": 0}))
+
+    hk(["doctor", "--fix"], conf, check=False, root=sweep_root)
+    check("sweep: doctor does not prune a report that is still undelivered", rd.is_dir())
+
+    hk(["gc", "--days", "0.0007", "--force"], conf, root=sweep_root)
+    check("sweep: gc agrees with the sweep", rd.is_dir())
+
+    # The first scan wrote incident.json for the undelivered report, and incidents are kept as
+    # evidence -- so this leg has to bypass that keeper (--force) to isolate the grace itself.
+    no_grace = cfg("sweep2", retention_days=0.0007, delivery_grace_seconds=0)
+    hk(["gc", "--days", "0.0007", "--force"], no_grace, root=sweep_root)
+    check("sweep: with the grace disabled, the sweep proceeds", not rd.is_dir())
 
 
 def test_decision_inbox_round_trip() -> None:
