@@ -1047,6 +1047,32 @@ def test_gate_check_says_when_it_cannot_ask_the_cli() -> None:
     check("gate-check: it says the verdict is 'could not ask', not 'missing'",
           "could not ask" in out, out[-300:])
 
+    # A *set but unusable* override is the same "cannot ask" fact with a different cause: the message
+    # must name the variable rather than claim there is no CLI on PATH, and the old install hint must
+    # not come back for a plugin that is already installed.
+    for bad in (str(BASE / "no-such-hermes-binary"),):
+        env_bad = {**env, "HAWKEYE_HERMES_BIN": bad}
+        proc_bad = subprocess.run([sys.executable, str(HK), "gate-check"], capture_output=True,
+                                  text=True, env=env_bad, timeout=120)
+        out_bad = (proc_bad.stdout or "") + (proc_bad.stderr or "")
+        check("gate-check: a missing override path is reported as such",
+              proc_bad.returncode == 1 and "is set but not executable" in out_bad, out_bad[-300:])
+        check("gate-check: a missing override path does not claim PATH is empty",
+              "no hermes CLI on PATH" not in out_bad, out_bad[-300:])
+        check("gate-check: a missing override path does not print the install hint",
+              "./install.sh --gate" not in out_bad, out_bad[-300:])
+
+    notexec = BASE / "not-executable-hermes"
+    notexec.write_text("#!/bin/sh\nexit 0\n")
+    notexec.chmod(0o644)
+    env_ne = {**env, "HAWKEYE_HERMES_BIN": str(notexec)}
+    proc_ne = subprocess.run([sys.executable, str(HK), "gate-check"], capture_output=True,
+                             text=True, env=env_ne, timeout=120)
+    out_ne = (proc_ne.stdout or "") + (proc_ne.stderr or "")
+    check("gate-check: a non-executable override is reported as such",
+          proc_ne.returncode == 1 and "is set but not executable" in out_ne
+          and "./install.sh --gate" not in out_ne, out_ne[-300:])
+
     # Control: with the plugin files genuinely absent, the install hint is the right answer.
     empty = BASE / "gate-empty"
     empty.mkdir()

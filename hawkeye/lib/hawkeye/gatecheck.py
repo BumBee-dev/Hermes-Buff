@@ -49,9 +49,21 @@ def _cli() -> str:
     return (os.environ.get("HAWKEYE_HERMES_BIN") or "").strip() or (shutil.which("hermes") or "")
 
 
+def _cli_usable() -> str:
+    """The CLI we can actually run -- "" when it is missing, not a file, or not executable.
+
+    "The variable is set" is not the same fact as "the CLI can be asked": a Hermes reinstall or a
+    profile move leaves a unit carrying a stale HAWKEYE_HERMES_BIN, `enabled_state()` degrades to
+    `unknown` through OSError, and the renderer -- reading only the non-empty string -- printed the
+    old "reinstall the plugin" hint again for a plugin that was already installed.
+    """
+    exe = _cli()
+    return exe if exe and os.path.isfile(exe) and os.access(exe, os.X_OK) else ""
+
+
 def enabled_state(name: str) -> str:
     """``enabled`` | ``disabled`` | ``absent`` | ``unknown`` (no CLI, or it errored)."""
-    exe = _cli()
+    exe = _cli_usable()
     if not exe:
         return "unknown"
     cmd = [exe] + ([] if name == "default" else ["-p", name]) + ["plugins", "list", "--json"]
@@ -111,9 +123,15 @@ def render(rows: list[dict]) -> str:
         # A row with the files present and no CLI to ask about is "could not determine", not
         # "missing". Printing the install hint there sends the reader after the wrong thing -- and
         # the hint itself cannot run, because it needs the CLI that is already absent.
-        cannot_ask = not _cli()
+        cannot_ask = not _cli_usable()
         if cannot_ask:
-            lines.append('hk: no hermes CLI on PATH; set HAWKEYE_HERMES_BIN (looked for "hermes")')
+            override = (os.environ.get("HAWKEYE_HERMES_BIN") or "").strip()
+            if override:
+                # Naming it by what it *is*: "no CLI on PATH" would be false when the variable is set.
+                lines.append("hk: HAWKEYE_HERMES_BIN=%s is set but not executable;"
+                             " unset it to fall back to PATH" % override)
+            else:
+                lines.append('hk: no hermes CLI on PATH; set HAWKEYE_HERMES_BIN (looked for "hermes")')
         present = [r for r in gap_rows if r["present"]]
         if present and cannot_ask:
             lines.append("note   : plugin files are present on %s; the verdict is"

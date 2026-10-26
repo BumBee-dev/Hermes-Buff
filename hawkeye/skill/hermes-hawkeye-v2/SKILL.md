@@ -47,12 +47,14 @@ Python >= 3.11), this **skill** (the agent-side procedure), and an optional
   directory rather than the entry file).
 - **The host's home directory is a published list; this tool adds nothing to its top.** Runtime
   artefacts live under `<HERMES_HOME>/cache/<tool>/` (the shape Hermes uses for its own tool caches:
-  `cache/scratch`, `cache/<name>.json`), configuration under `$XDG_CONFIG_HOME/<tool>/`, and
+  `cache/scratch`, `cache/<name>.json`), configuration under  `$XDG_CONFIG_HOME/<tool>/`, and
   `hk paths` prints all three so a user never has to read the source to learn what is safe to
   delete. A migration must carry *finished* runs and **name** the live ones it leaves in the old
   root (moving a directory out from under a phase is the orphan bug again); keep a test that a run
   leaves nothing but `cache/` at the home root, and one that config resolution never *requires* a
-  directory inside `HERMES_HOME`.
+  directory inside `HERMES_HOME`. Anything a tool of this kind creates in the UI's own store (a
+  session row, an index entry) is the same problem from the other side: read `hk paths`' cousins —
+  the WebUI's `sessions/` directory — before claiming a deleted artefact is gone.
 - **Move a path or rename a symbol, then grep for its old spelling.** The default run root moved and
   `hk --help` plus two README lines still named the old one, so the flag help pointed a user at a
   directory the tool no longer writes. Search help strings, the config example and README for the
@@ -182,10 +184,16 @@ one model, treat the first two as mandatory.
   answering cheap but **never executes on its own** (anything safe to decide alone does not belong in
   the inbox), and nothing auto-answers. Recipe and the read-only facts in
   `references/in-session-watch.md`.
-- **cron cannot address an existing session.** Its delivery targets platforms (webui is not one)
-  and every fire creates its own session. The only mechanism that lands in a specific session is a
-  Hermes-managed background process exiting (phase exit → notify). Choose cron only when nobody
-  needs to see it in this chat.
+- **cron and the watcher are two halves, not two alternatives.** cron cannot address an existing
+  session (its delivery targets platforms, webui is not one, and every fire opens its own session),
+  and a pure `hk run` watcher is *invisible* in the WebUI's scheduled-task list — which is exactly
+  what the user reports as "I cannot see my scheduled task". When the thing is meant to be
+  scheduled, build both and split by role: cron with `no_agent: true` + a script is visible, costs
+  0 tokens and opens **no** session at all (measured: a silent tick took 3.4 s, 0 API calls, the
+  session table unchanged), so it detects, appends the finding with `hk report --into <ledger>` and
+  appends one line to a signal file; `hk run -- <hk watch-file --path <signal>>` turns a change to
+  that file into the wake. One ledger, one signal, no window on either side; the wake turn re-arms
+  the watcher half. Mechanics and the measured numbers are in `references/in-session-watch.md`.
 - **A delegated fix is a claim until you re-derive it.** When an autonomous loop (cron, a worker, a
   subagent) reports "fixed in <commit>", treat that as a pointer, not a fact: read the commit, run
   both suites yourself, and reproduce the behaviour on a live probe. Twice in one maintenance pass
@@ -203,6 +211,13 @@ one model, treat the first two as mandatory.
   so an install that only touched `default` blocks the orchestrator's own completions and
   lets every worker through. Exit code 1 names the ungated profiles; `install.sh --gate
   --all-profiles` fixes them all.
+- **Fail closed, but never print a fix that cannot run.** In a cron-shaped environment
+  (`env -i PATH=/usr/bin:/bin`) there is no `hermes` on `PATH`, so every row reads
+  `enabled=unknown → NO`: the right verdict, but the remediation printed was
+  `./install.sh --gate --all-profiles`, which needs the very CLI that is missing. Keep the fail-closed
+  exit code and fix the sentence: distinguish "could not determine" from "missing" — name the missing
+  CLI and the override (`HAWKEYE_HERMES_BIN`), and print the install hint only for rows whose files are
+  actually absent, with a test for **both** branches so the hint cannot silently disappear.
 - Judge against the acceptance criteria written into the card body, never against
   the subagent's self-assessment.
 - **First real dispatch: one card, default profile, whole chain.** Only after you
@@ -304,11 +319,12 @@ Inbound reports on the public repo are watched by a **bounded in-session watcher
 `hk run --id <id> -- <script>` where the script polls `issue-watch.py --json` every few minutes
 (deterministic and read-only, so an unchanged repo produces an identical tick — 0 tokens) and
 prints one milestone line on news **or** on TTL expiry. `templates/ledger-watch.sh` is that loop with
-the four rules already baked in (heartbeat, record-then-exit, seen-state, explicit poll-failure
-lines); copy it and replace the poll command and the ledger id. The wake then lands in the chat that
+the rules already baked in (heartbeat, record-then-exit, seen-state, explicit poll-failure
+lines); copy it and replace the poll command and the ledger id. For the cron-split shape the same
+script is the cron `no_agent` script, and `hk watch-file` is armed on the signal file it touches. The wake then lands in the chat that
 armed it, and the window always closes with a question instead of going quiet. cron is only for
 "nobody is here to see it": every fire opens a NEW session window and cannot deliver into an
-existing one. Four rules that cost the loop silently:
+existing one. Five rules that cost the loop silently:
 
 - **A quiet-by-design job has to prove it is alive.** With the default `stall_seconds` (900 s) the
   phase kills any job whose `work.log` stops growing, and a watcher that only speaks on news is
@@ -325,6 +341,14 @@ existing one. Four rules that cost the loop silently:
   each exit orphans the job). Use `hk run --report-interval 0` so it exits only on news or its TTL;
   the mechanism and the event-log signature are in `references/in-session-watch.md`.
 
+- **Watch closed items too; on a closed item only a reply is news.** A poll that queries `state=open`
+  goes blind exactly where a reporter's follow-up lands: a confirmation posted on a closed issue sat
+  unseen for hours while the loop reported "nothing new", and that reply is the whole point of watching.
+  Per state: open → a new item, an edited body or any comment is news; closed → **only** a new comment
+  (closing is the maintainer's own act); closed and never seen → history, not an event. So the seen-state
+  must record every item the scan *examined*, not just the ones it reported, or the first later reply
+  arrives together with the item's entire comment history. Skip the per-item comment fetch when
+  `updated_at` has not moved — that is most of a quiet tick's request budget.
 - **Advance the seen-state strictly after the reply lands** (`--mark-seen` last), and filter
   comments authored by the token's own account (`--ignore-authors`). The watcher posts as the
   account that owns the GitHub token, so a state advanced before posting leaves your own reply
@@ -360,6 +384,17 @@ existing one. Four rules that cost the loop silently:
   by actually importing `tomllib` and `sqlite3`, because a half-built venv looks perfect to `os.path`. Never pin an
   absolute interpreter in the unit: the install hash moves on every `hermes update` and `/usr/bin/python3` differs
   per distribution. Guard the 3.6 promise with `ast.parse(src, feature_version=(3, 6))` over both files.
+- **A capability probe and a re-exec both launch children, so both must scrub what they hand over.** A
+  `PYTHONPATH` carrying a `sitecustomize` that reports an old version made every candidate look unusable
+  (`find()` returned `None` on a healthy host); after only the probe was fixed, the *re-executed* tool
+  rejected itself, because `os.execv` passes the caller's environment straight to the new interpreter and
+  the last line was written by the interpreter it had just refused to use. Strip
+  `PYTHONPATH`/`PYTHONHOME`/`PYTHONSTARTUP` in **one** helper, use it for the probe and for `os.execve`,
+  and put the re-entry guard flag inside that dict (not in `os.environ`, or the same fact has two homes).
+  When the running binary is also the only candidate, re-exec into it under the clean environment instead
+  of reporting "found nothing usable" — the version it reported was the environment's, not its own. Test
+  it **end-to-end**: run the real entry point as a subprocess under the hostile environment and assert the
+  exit code, because a module-level assertion stayed green the whole time the CLI was red.
 - **The kernel ignores `HERMES_HOME` for the board root on purpose** (`kanban_home()` uses
   `HERMES_KANBAN_HOME` or the machine root, because boards are shared across profiles). Any
   test that points `HERMES_HOME` at a fixture and then resolves a board must set
