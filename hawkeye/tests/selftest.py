@@ -1209,6 +1209,45 @@ def test_ledger_round_allocator_is_shipped_and_serialised() -> None:
           (foreign_home / "round.current").read_text().strip() == "8",
           (foreign_home / "round.current").read_text().strip())
 
+    # `reuse N` is the caller stating which round this is, so `record` must honour the pin -- but it
+    # must not resurrect a number the ledger already holds. Both halves are asserted: a pin above the
+    # ledger is written as pinned (round 7 after 1..6), a pin at or below it is refused, and a second
+    # record after a pinned write allocates the next number as usual.
+    pin_home = BASE / "ledger-pin-home"
+    pin_home.mkdir()
+    con = sqlite3.connect(str(pin_home / "state.db"))
+    con.execute("create table messages (id integer primary key, session_id text, content text)")
+    for n in range(1, 7):
+        con.execute("insert into messages(session_id, content) values (?, ?)",
+                    ("led", "## 第 %d 轮 · history\n\nx" % n))
+    con.commit(); con.close()
+    (pin_home / "round.current").write_text("6\n")
+    (pin_home / "round.closed").write_text("6\n")
+    pin_stub = pin_home / "stub-hk"
+    pin_stub.write_text('#!/bin/bash\nfor a in "$@"; do case "$a" in *record.md) '
+                        'basename "$a" >> "' + str(pin_home / "seen.log") + '";; esac; done\n')
+    pin_stub.chmod(0o755)
+    penv = {**ENV, "IW_STATE_DIR": str(pin_home), "HERMES_HOME": str(pin_home),
+            "IW_LEDGER": "led", "IW_HK": str(pin_stub)}
+    subprocess.run(["bash", str(script), "reuse", "7"], env=penv, capture_output=True, timeout=60)
+    subprocess.run(["bash", str(script), "record", "backfill", str(body)], env=penv,
+                   capture_output=True, text=True, timeout=60)
+    check("ledger-round: reuse N is honoured by the next record",
+          "round-7-record.md" in (pin_home / "seen.log").read_text(), 
+          (pin_home / "seen.log").read_text().strip())
+    subprocess.run(["bash", str(script), "record", "second", str(body)], env=penv,
+                   capture_output=True, text=True, timeout=60)
+    check("ledger-round: a pinned write is consumed once (the next record allocates)",
+          (pin_home / "seen.log").read_text().split() == ["round-7-record.md", "round-8-record.md"],
+          " ".join((pin_home / "seen.log").read_text().split()))
+
+    dup = subprocess.run(["bash", str(script), "reuse", "3"], env=penv, capture_output=True, timeout=60)
+    dup2 = subprocess.run(["bash", str(script), "record", "duplicate", str(body)], env=penv,
+                          capture_output=True, text=True, timeout=60)
+    check("ledger-round: a pin onto a round the ledger already has is refused",
+          dup.returncode == 0 and dup2.returncode == 2 and "already exists" in (dup2.stderr or ""),
+          "rc=%s %s" % (dup2.returncode, (dup2.stderr or "")[-140:]))
+
     # A counter in a second conventional location is a second numbering; it cannot be seen from the
     # output, so the allocator has to say it.
     split_home = BASE / "ledger-split-home"

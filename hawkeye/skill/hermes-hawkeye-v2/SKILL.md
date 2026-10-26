@@ -45,6 +45,14 @@ Python >= 3.11), this **skill** (the agent-side procedure), and an optional
   after the install that every reference the skill names exists, and keep a test for the class
   (grep the names out of `SKILL.md`, compare with the tree, and check the installer copies a
   directory rather than the entry file).
+- **The installer promise covers helper scripts too, not only `references/*.md`.** Anything `SKILL.md`
+  names by path is a promise: a rule that says "the number is allocated by
+  `<HERMES_HOME>/scripts/ledger-round.sh`" is unexecutable on the host that just installed the skill if
+  the installer copied only the skill directory. Install the helper to the location the skill names
+  (`install -m 755 "$REPO_DIR/config/scripts/<name>" "$HERMES_HOME/scripts/<name>"`), grep
+  `config/scripts/*.sh` out of `SKILL.md` in the same completeness loop that greps `references/*.md`, and
+  `die` when one is missing — otherwise the first fresh install invents its own copy, and the numbers,
+  the format and the state paths diverge between hosts.
 - **The host's home directory is a published list; this tool adds nothing to its top.** Runtime
   artefacts live under `<HERMES_HOME>/cache/<tool>/` (the shape Hermes uses for its own tool caches:
   `cache/scratch`, `cache/<name>.json`), configuration under  `$XDG_CONFIG_HOME/<tool>/`, and
@@ -189,8 +197,17 @@ one model, treat the first two as mandatory.
   what changed, how it was verified, the commit, the reply link — lives only in that entry. The
   conversation that owns the wake gets a short summary and a pointer to the round: long reports belong
   in the child session, or the main window becomes the log. The counter lives next to the ledger in
-  the run cache, and the allocator is the shipped script, not the turn's own bookkeeping. **An
-  appended message is permanent**: the kernel exposes no per-message
+  the run cache, and the allocator is the shipped script, not the turn's own bookkeeping.
+- **A number that guards an append-only store must be derived from the store, not from your own
+  counter.** The ledger has more than one writer — a wake turn, a human, another agent — and
+  `hk report --into` is the documented way to write into it, so an allocator that trusts only its own
+  state file writes a number the record already holds (the observed ledger read `1,2,3,4,5,5`, and the
+  duplicate had to be repaired by editing the message store by hand). Read the highest existing value
+  out of the session (a read-only sqlite query is enough — no kernel boot), allocate above
+  `max(counter, closed, ledger_max)`, and keep a number allocated by `detect` only while nothing else
+  has claimed it. State the rule as "sequence order equals number order": hold the lock across the
+  read **and** the append, or a later cycle can land before the entry it belongs after.
+- **An appended message is permanent**: the kernel exposes no per-message
   delete, so a numbering test pointed at the live ledger leaves an entry nothing can remove — exercise
   the helper against a fixture session, and if junk does land, append a correction that names the
   bogus entry rather than pretending the record is clean.

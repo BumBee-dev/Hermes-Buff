@@ -33,6 +33,7 @@ set -u
 STATE_DIR=${IW_STATE_DIR:-${HERMES_HOME:?HERMES_HOME (or IW_STATE_DIR) is required}/cache/hawkeye/issue-ledger}
 COUNTER="$STATE_DIR/round.current"
 CLOSED="$STATE_DIR/round.closed"     # the last round that already has a written entry
+PINNED="$STATE_DIR/round.pinned"     # an explicit `reuse N` waiting to be consumed by `record`
 LOCK="$STATE_DIR/round.lock"
 HK=${IW_HK:-hk}
 CURRENT=
@@ -103,6 +104,15 @@ _pin() {
   _lock
   CURRENT=$1
   printf '%s\n' "$CURRENT" > "$COUNTER"
+  # A pin is the caller stating which round this is, so `record` must honour it: it writes
+  # `round.pinned`, and `round.closed` is set to N-1 so a successful pinned write leaves consistent
+  # bookkeeping (a *second* record then allocates N+1 as usual).
+  if [ "$CURRENT" -gt 0 ]; then
+    printf '%s\n' "$((CURRENT - 1))" > "$CLOSED"
+    printf '%s\n' "$CURRENT" > "$PINNED"
+  else
+    rm -f "$PINNED"
+  fi
   _unlock
 }
 
@@ -144,6 +154,7 @@ case "${1:-}" in
     raw=$2
     [ -f "$raw" ] || _die "no such file: $raw"
     _alloc
+    rm -f "$PINNED"          # a fresh detection supersedes any back-fill pin
     kept="$STATE_DIR/round-$CURRENT.raw.json"
     cp "$raw" "$kept" || _die "could not keep the payload at $kept"
     _say
@@ -160,11 +171,23 @@ case "${1:-}" in
     closed=0
     [ -f "$CLOSED" ] && closed=$(tr -d '[:space:]' < "$CLOSED" 2>/dev/null)
     case "$closed" in ''|*[!0-9]*) closed=0 ;; esac
+    pinned=0
+    [ -f "$PINNED" ] && pinned=$(tr -d '[:space:]' < "$PINNED" 2>/dev/null)
+    case "$pinned" in ''|*[!0-9]*) pinned=0 ;; esac
     lmax=$(_ledger_max)
-    if [ "$CURRENT" -eq 0 ] || [ "$closed" -ge "$CURRENT" ] || [ "$lmax" -ge "$CURRENT" ]; then
+    if [ "$pinned" -gt 0 ]; then
+      # An explicit `reuse N` is the caller saying which round this is. Honouring it is the point of
+      # the verb -- but it must not resurrect a number the ledger already holds, or the record becomes
+      # the duplicate the allocator exists to prevent. Refusing keeps both promises.
+      if [ "$lmax" -ge "$pinned" ]; then
+        _unlock
+        _die "第 $pinned 轮 already exists in the ledger (highest is $lmax); pin a number above it"
+      fi
+      CURRENT=$pinned
+    elif [ "$CURRENT" -eq 0 ] || [ "$closed" -ge "$CURRENT" ] || [ "$lmax" -ge "$CURRENT" ]; then
       # Either nothing was allocated yet, this round already has its entry, or somebody else (a wake
       # turn, a human, another agent) already appended this number through `hk report --into`. A new
-      # round is the honest answer in all three cases: one entry per round, and never below the ledger.
+      # round is the honest answer in all three cases: one entry per round, never below the ledger.
       [ "$closed" -gt "$CURRENT" ] && CURRENT=$closed
       [ "$lmax" -gt "$CURRENT" ] && CURRENT=$lmax
       CURRENT=$((CURRENT + 1))
@@ -183,6 +206,7 @@ case "${1:-}" in
     fi
     _unlock
     printf '%s\n' "$CURRENT" > "$CLOSED"
+    rm -f "$PINNED"          # a pin is consumed by the write it described
     rm -f "$entry"
     _say
     ;;
