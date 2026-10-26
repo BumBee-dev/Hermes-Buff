@@ -106,13 +106,23 @@ class Phase:
             pass
 
     def _set(self, **patch: Any) -> None:
-        # Refuse to write our in-memory copy over a verdict another process wrote: this is how
-        # finish_reason=stopped used to become gaveup, because the loop never re-read
-        # state.json after Phase.__init__ (#7).
-        if not self.state.get("finished") and self._stop_requested():
-            raise _Stopped()
-        self.state.update(patch)
-        store.write_json(self.rd / store.STATE, self.state)
+        # The check and the write must be one step. Read-then-write left a window where a stop
+        # landed after the check and was overwritten by this copy: the verdict became "gaveup",
+        # the loop started another attempt, and it reported a run the operator had cancelled.
+        # Reproduced 45/64 under concurrent load (#7's family). cmd_stop writes through
+        # store.update_json(), which takes the same lock, so the two writers serialise.
+        with store.file_lock(self.rd / store.STATE):
+            disk = store.read_json(self.rd / store.STATE, {}) or {}
+            # Refuse only a *progress* write on top of somebody else's verdict. A phase that is
+            # itself finishing (self.state.finished, or patch.finished) still has to write its
+            # last counters -- the report's own counters are written after _finish, and refusing
+            # them dropped reports/report.md from every successful run.
+            if (disk.get("finished") and not self.state.get("finished")
+                    and not patch.get("finished")):
+                self.state = disk
+                raise _Stopped()
+            self.state.update(patch)
+            store.write_json(self.rd / store.STATE, self.state)
 
     def _stop_requested(self) -> bool:
         """True when another process finished this run, with state reloaded from disk.

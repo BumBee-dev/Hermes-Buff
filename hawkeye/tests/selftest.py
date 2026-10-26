@@ -1252,37 +1252,141 @@ def test_the_sweep_shares_the_gc_predicate() -> None:
 def test_a_spelled_out_default_path_is_not_a_redirect() -> None:
     """`--config` at the *default* path must not move the host's units (#9, follow-on).
 
-    "Any path-moving flag marks the install as redirected" reads a documented one-liner that
-    names the real config -- it lives outside HERMES_HOME on this host, so the flag is always
-    passed -- as a fixture install, and derives the unit dir under HERMES_HOME. The doctor then
-    stops being started and nothing says why: the same failure mode as #9, one flag further in.
-    A flag may only redirect the install when its value really differs from the default it
-    replaces.
+    "Any path-moving flag marks the install as redirected" read a documented one-liner that names
+    the real config -- it lives outside HERMES_HOME on this host, so the flag is always passed --
+    as a fixture install, and derived the unit dir under HERMES_HOME. The doctor then stops being
+    started and nothing says why: the same failure mode as #9, one flag further in.
+
+    The baseline is now this shell's own HOME/XDG rather than the values the script honours, so a
+    *non-default home* is a redirect whoever moved it (flag or environment) -- which means this
+    test supplies a fake HOME and spells the defaults out, instead of relying on a non-default
+    HERMES_HOME being treated as ordinary.
     """
     installer = Path(__file__).resolve().parents[1] / "install.sh"
-    home = BASE / "spelled-home"
+    fake_home = BASE / "spelled-home"
     xdg = BASE / "spelled-xdg"
+    fresh_home = fake_home / ".hermes"
+    fresh_home.mkdir(parents=True, exist_ok=True)
     default_conf = xdg / "hawkeye" / "hawkeye.toml"
-    env = {**ENV, "HERMES_HOME": str(home), "XDG_CONFIG_HOME": str(xdg)}
+    env = {**ENV, "HOME": str(fake_home), "XDG_CONFIG_HOME": str(xdg)}
+    env.pop("HERMES_HOME", None)
+    env.pop("HAWKEYE_V2_CONFIG", None)
+    env.pop("HAWKEYE_KERNEL_SRC", None)   # a caller's checkout would make the probe refuse
 
     spelled = subprocess.run(["bash", str(installer), "--print-only", "--no-enable",
-                              "--skip-skill", "--config", str(default_conf)],
+                              "--skip-skill", "--hermes-home", str(fresh_home),
+                              "--config", str(default_conf)],
                              capture_output=True, text=True, timeout=120, env=env)
     out = spelled.stdout + spelled.stderr
     check("spelled: the spelled-out default install succeeds", spelled.returncode == 0,
           out.strip()[-300:])
     check("spelled: units stay in the default unit dir",
           "units     : %s/systemd/user" % xdg in out, out.strip()[-400:])
-    check("spelled: nothing claims to be redirected", "redirected install" not in out,
+    check("spelled: nothing claims to be redirected", "non-default" not in out,
           out.strip()[-400:])
 
     moved = subprocess.run(["bash", str(installer), "--print-only", "--no-enable",
-                            "--skip-skill", "--config", str(BASE / "other" / "hawkeye.toml")],
+                            "--skip-skill", "--hermes-home", str(fresh_home),
+                            "--config", str(BASE / "other" / "hawkeye.toml")],
                            capture_output=True, text=True, timeout=120, env=env)
     out = moved.stdout + moved.stderr
     check("spelled: a config outside the default still redirects the units",
-          "units     : %s/systemd/user" % home in out and "redirected install" in out,
+          "units     : %s/systemd/user" % fresh_home in out and "non-default" in out,
           out.strip()[-400:])
+
+
+def test_env_driven_install_is_also_a_redirect() -> None:
+    """A fixture exported into the environment is still a fixture (#9, second round).
+
+    The redirect test used to compare a *flag* against the value the environment had already
+    supplied, so an install driven by `HERMES_HOME=... ./install.sh` never looked redirected and
+    wrote fixture paths into the host's real unit dir -- #9's failure with no flag involved, which
+    is exactly how a harness sets paths up.
+
+    And because `systemd-analyze --user unit-paths` is authoritative, enabling a timer from a
+    directory it does not read is refused instead of installing something that never runs.
+    """
+    installer = Path(__file__).resolve().parents[1] / "install.sh"
+    home = BASE / "env-home"
+    xdg = BASE / "env-xdg"
+    cfg_path = BASE / "env-cfg" / "hawkeye.toml"
+    env = {**ENV, "HERMES_HOME": str(home), "HAWKEYE_V2_CONFIG": str(cfg_path),
+           "XDG_CONFIG_HOME": str(xdg)}
+    env.pop("HAWKEYE_KERNEL_SRC", None)
+
+    printed = subprocess.run(["bash", str(installer), "--print-only", "--no-enable", "--skip-skill"],
+                             capture_output=True, text=True, timeout=120, env=env)
+    out = printed.stdout + printed.stderr
+    check("env install: units follow the redirected home",
+          "units     : %s/systemd/user" % home in out, out.strip()[-400:])
+    check("env install: the host unit dir is not named",
+          "units     : %s/systemd/user" % xdg not in out, out.strip()[-400:])
+
+    enabled = subprocess.run(["bash", str(installer), "--skip-skill"],
+                             capture_output=True, text=True, timeout=120, env=env)
+    check("env install: enabling from a dir systemd does not read is refused",
+          enabled.returncode != 0 and "unit-paths" in (enabled.stdout + enabled.stderr),
+          (enabled.stdout + enabled.stderr).strip()[-300:])
+    check("env install: the refused install wrote no unit into the host dir",
+          not (xdg / "systemd" / "user" / "hawkeye-doctor.service").exists())
+
+
+def test_set_cannot_overwrite_a_stop_verdict() -> None:
+    """A progress write must not resurrect a run somebody just stopped (#7's family).
+
+    The field artefact was `attempt_failed -> run_stopped -> attempt_start -> gaveup -> report`
+    with `finish_reason=gaveup`: the stop's verdict was overwritten by the phase's in-memory copy,
+    because `_set` checked "is it finished?" and then wrote, as two steps. Forcing that
+    interleaving here is a child process hammering `_set` while the verdict lands; the check and
+    the write now share the lock `hk stop` uses, so the verdict cannot be lost.
+    """
+    import importlib
+    lib = str(Path(__file__).resolve().parents[1] / "lib")
+    sys.path.insert(0, lib)
+    store = importlib.import_module("hawkeye.store")
+
+    conf = cfg("setrace")
+    rid = "setrace-1"
+    rd = RUNS / rid
+    rd.mkdir(parents=True)
+    (rd / "meta.json").write_text(json.dumps({"kind": "exec", "entry": "/bin/true",
+                                              "created_at": time.time()}))
+    store.write_json(rd / "state.json", {"finished": False, "attempts_done": 0})
+
+    child = (
+        "import sys, time\n"
+        "sys.path.insert(0, %r)\n"
+        "from hawkeye import config as cm, phase as pm\n"
+        "cfg = cm.load(%r)\n"
+        "p = pm.Phase(cfg, %r)\n"
+        "n = 0\n"
+        "try:\n"
+        "    end = time.time() + 2.0\n"
+        "    while time.time() < end:\n"
+        "        n += 1\n"
+        "        p._set(attempts_done=n)\n"
+        "except pm._Stopped:\n"
+        "    print('STOPPED', n)\n"
+        "else:\n"
+        "    print('LOOPED', n)\n"
+        % (lib, str(conf), rid)
+    )
+    proc = subprocess.Popen([sys.executable, "-c", child], stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True, env=ENV)
+    time.sleep(0.5)
+    store.update_json(rd / "state.json", {"finished": True, "finish_reason": "stopped"})
+    out, err = proc.communicate(timeout=30)
+    final = store.read_json(rd / "state.json", {}) or {}
+    # A hand-made run must not outlive this test: the suite counts and scans the shared root.
+    shutil.rmtree(rd, ignore_errors=True)
+
+    check("set race: the stop verdict survives a hammering progress writer",
+          final.get("finished") is True and final.get("finish_reason") == "stopped", str(final))
+    check("set race: the writer exited cleanly and reported what it saw",
+          proc.returncode == 0 and out.strip().split()[:1] in (["STOPPED"], ["LOOPED"]),
+          "rc=%s out=%r err=%r" % (proc.returncode, out.strip()[:80], err.strip()[:160]))
+    check("set race: a writer that saw the stop raised instead of continuing",
+          out.strip().startswith("STOPPED"), "out=%r err=%r" % (out.strip()[:80], err.strip()[:200]))
 
 
 def test_decision_inbox_round_trip() -> None:
@@ -1389,6 +1493,8 @@ def main() -> int:
                  test_doctor_does_not_flag_a_consumed_report,
                  test_gc_waits_for_a_report_to_be_delivered,
                  test_the_sweep_shares_the_gc_predicate,
+                 test_env_driven_install_is_also_a_redirect,
+                 test_set_cannot_overwrite_a_stop_verdict,
                  test_a_spelled_out_default_path_is_not_a_redirect,
                  test_decision_inbox_round_trip,
                  test_installer_installs_every_reference,

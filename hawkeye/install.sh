@@ -123,36 +123,42 @@ sys.exit(0 if sys.version_info >= (3, 11) else 1)
 PY
 
 HERMES_HOME="${HERMES_HOME/#\~/$HOME}"
+HAWKEYE_V2_CONFIG="${HAWKEYE_V2_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/hawkeye/hawkeye.toml}"
+HAWKEYE_V2_CONFIG="${HAWKEYE_V2_CONFIG/#\~/$HOME}"
 
 # A redirected install must never rewrite the units of the host it is testing on: they name
 # HERMES_HOME and the hk path, so pointing them at a fixture silently disables the doctor on the
-# real machine (measured: 65 minutes of 203/EXEC while the timer kept firing). Derive a unit dir
-# under the redirect instead of refusing, and say so; --unit-dir still wins.
+# real machine (measured: 65 minutes of 203/EXEC while the timer kept firing).
 #
-# "Redirected" means a flag *moved the path it names*, not "a flag was passed". The documented
-# one-liner spells the default config out (it lives outside HERMES_HOME on this host), and
-# treating that as a fixture install moved a real host's units out of ~/.config/systemd/user --
-# the doctor then stops being started and nothing says why: #9's failure, one flag further in.
+# "Redirected" is decided by the *resolved* paths against this shell's own HOME/XDG defaults --
+# never against the values this script honours. Comparing against $HERMES_HOME made an install
+# driven by the environment look like the default one, so a fixture exported into the environment
+# still wrote its paths into the real unit dir (#9, second round).
 _trim_slash() { printf '%s' "${1%/}"; }
+FRESH_HOME="$HOME/.hermes"
+FRESH_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/hawkeye/hawkeye.toml"
+NON_DEFAULT=0
 REDIRECTED=0
-if [ "$HOME_GIVEN" = "1" ] && [ "$(_trim_slash "$HERMES_HOME")" != "$(_trim_slash "$DEFAULT_HERMES_HOME")" ]; then
-    REDIRECTED=1
+[ "$(_trim_slash "$HERMES_HOME")" != "$(_trim_slash "$FRESH_HOME")" ] && NON_DEFAULT=1
+[ "$(_trim_slash "$HAWKEYE_V2_CONFIG")" != "$(_trim_slash "$FRESH_CONFIG")" ] && NON_DEFAULT=1
+
+# The one case that is not a redirect: updating the install this host already has. The existing
+# unit names the same home, so writing it again is the point.
+if [ "$UNIT_DIR_GIVEN" = "0" ] && [ "$NON_DEFAULT" = "1" ]; then
+    if grep -qsx "Environment=HERMES_HOME=$HERMES_HOME" "$UNIT_DIR/hawkeye-doctor.service"; then
+        :
+    else
+        UNIT_DIR="$HERMES_HOME/systemd/user"
+        REDIRECTED=1
+        note "non-default paths with no --unit-dir: writing units to $UNIT_DIR"
+    fi
 fi
-if [ "$CONFIG_GIVEN" = "1" ] && [ "$(_trim_slash "${HAWKEYE_V2_CONFIG/#\~/$HOME}")" != "$(_trim_slash "$DEFAULT_CONFIG")" ]; then
-    REDIRECTED=1
+# systemd only reads the dirs it lists; a timer installed outside them never runs, and enabling it
+# is the failure this guard turns into a message.
+if [ "$REDIRECTED" = "1" ] && [ "$DO_ENABLE" = "1" ]; then
+    die "refusing to enable from $UNIT_DIR: 'systemd-analyze --user unit-paths' does not read it. Pass --unit-dir DIR (for a host install: --unit-dir $DEFAULT_UNIT_DIR), or copy the units yourself."
 fi
-if [ "$SKILL_GIVEN" = "1" ] && [ "$(_trim_slash "${SKILL_DEST/#\~/$HOME}")" != "$(_trim_slash "$HERMES_HOME/skills/software-development/hermes-hawkeye-v2")" ]; then
-    REDIRECTED=1
-fi
-if [ "$UNIT_DIR_GIVEN" = "0" ] && [ "$REDIRECTED" = "1" ]; then
-    UNIT_DIR="$HERMES_HOME/systemd/user"
-    note "redirected install: units go to $UNIT_DIR (pass --unit-dir to choose)"
-fi
-# Derive the config default only now: --hermes-home may have just moved HERMES_HOME,
-# and resolving it up top silently kept an inherited value instead (measured: with
-# HERMES_HOME exported in the environment, --hermes-home /tmp/x still wrote to the
-# inherited home).
-HAWKEYE_V2_CONFIG="${HAWKEYE_V2_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/hawkeye/hawkeye.toml}"
+
 HAWKEYE_V2_CONFIG="${HAWKEYE_V2_CONFIG/#\~/$HOME}"
 
 # Old installs kept the config inside HERMES_HOME. Move it rather than starting over: a silent

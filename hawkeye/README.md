@@ -169,8 +169,14 @@ Two guards make that boot safe to run from a 2-minute timer:
 
 ```bash
 # Install the fallback timer (every 2 minutes) and the agent skill, rendered for this host
-./install.sh --hermes-home "<HERMES_HOME>" --kernel-src "<HERMES_SRC>"
+./install.sh --hermes-home "<HERMES_HOME>" --kernel-src "<HERMES_SRC>" \
+    --unit-dir "$HOME/.config/systemd/user"
 ./install.sh --print-only                  # inspect the rendered units without writing
+
+# --unit-dir is only needed when <HERMES_HOME> is not ~/.hermes (or the config is outside
+# $XDG_CONFIG_HOME): the installer treats such an install as redirected, writes its units under
+# <HERMES_HOME>/systemd/user and refuses to enable them, because systemd never reads that path.
+# Updating an install whose unit already names the same home needs no flag.
 systemctl --user list-timers | grep hawkeye
 
 # The live config lands in <HERMES_HOME>/hawkeye-v2/hawkeye.toml, created from
