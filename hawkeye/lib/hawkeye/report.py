@@ -66,6 +66,23 @@ def _session_db_class():
             os.environ["HERMES_DISABLE_LAZY_INSTALLS"] = prev_lazy
 
 
+def _stamp_activity(db: Any, sid: str, description: str) -> None:
+    """Mark the report as activity on the session.
+
+    ``append_message`` bumps ``message_count`` but leaves ``last_activity_at`` NULL -- that field is
+    stamped by the agent's own turns -- so a report-only session carries no time at all and reads as
+    "never used" in every surface that sorts or labels by activity. A written report *is* activity.
+    Guarded because the method is newer than some releases we still support.
+    """
+    touch = getattr(db, "touch_session_activity", None)
+    if touch is None:
+        return
+    try:
+        touch(sid, description=description)
+    except Exception:                              # noqa: BLE001 - metadata only, never fatal
+        pass
+
+
 def child_id() -> str:
     return "hawkereport-%d-%04x" % (int(time.time()), os.getpid() & 0xFFFF)
 
@@ -98,6 +115,7 @@ def write_child(parent: str, title: str, body: str, *, source: str = "hawkeye") 
             cwd=str(Path.cwd()),
         )
         db.append_message(sid, "assistant", body)
+        _stamp_activity(db, sid, "hawkeye report")
     finally:
         db.close()
     return sid
@@ -124,7 +142,9 @@ def append_child(sid: str, title: str, body: str) -> int:
             raise ValueError("session %s is a top-level session; a ledger must be a child session"
                              % sid.strip())
         stamp = "[%s] %s\n\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), title or "entry")
-        return db.append_message(sid.strip(), "assistant", stamp + body)
+        row = db.append_message(sid.strip(), "assistant", stamp + body)
+        _stamp_activity(db, sid.strip(), "hawkeye ledger entry")
+        return row
     finally:
         db.close()
 
