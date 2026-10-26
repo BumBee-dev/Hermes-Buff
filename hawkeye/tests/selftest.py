@@ -1085,13 +1085,17 @@ def test_gate_check_says_when_it_cannot_ask_the_cli() -> None:
 
 
 def test_ledger_round_allocator_is_shipped_and_serialised() -> None:
-    """The round allocator must be in the tree, and two callers in one tick must not collide.
+    """The round allocator: shipped, serialised, and honest about its five failure modes.
 
-    Filed as #17: a skill rule said "the number is allocated by a helper script", and no such script
-    existed in the repository — so on a fresh install the instruction was literally unexecutable, and
-    each host would invent its own numbering (which is the drift the rule exists to prevent). This test
-    asserts the shipped script's three raw verbs, plus the one property that makes a shared counter
-    safe: concurrent allocation yields two *different*, adjacent numbers.
+    Filed as #17 (the script did not exist, so the rule was unexecutable on a fresh install) and then
+    as #18 plus four more defects in one report -- every one of them loses or misnumbers a round
+    silently, which is the drift the script exists to prevent:
+
+    * a corrupt counter read as "start at 1"                -> refuse instead
+    * a failed append still exiting 0 and deleting the file -> keep the file, exit non-zero
+    * a read outside the lock, so 32 can land before 31     -> one critical section per append
+    * an unexpected state dir with its own fresh counter    -> say where both counters are
+    * two records for one round                             -> one entry per round (`round.closed`)
     """
     script = Path(__file__).resolve().parents[1] / "config" / "scripts" / "ledger-round.sh"
     check("ledger-round: the allocator ships in the tree", script.is_file(), str(script))
@@ -1101,44 +1105,85 @@ def test_ledger_round_allocator_is_shipped_and_serialised() -> None:
     work.mkdir()
     env = {**ENV, "IW_STATE_DIR": str(work), "HERMES_HOME": str(BASE)}
 
-    def run(*args: str) -> subprocess.CompletedProcess:
+    def run(*args: str, **over) -> subprocess.CompletedProcess:
         return subprocess.run(["bash", str(script), *args], capture_output=True, text=True,
-                              env=env, timeout=60)
+                              env={**env, **over}, timeout=60)
 
-    first = run("peek")
-    check("ledger-round: peek on a fresh state is 0", first.stdout.strip() == "0", first.stdout.strip())
+    check("ledger-round: peek on a fresh state is 0", run("peek").stdout.strip() == "0")
+    check("ledger-round: every call prints its state path and round to stderr",
+          "state=" in run("peek").stderr and "round=" in run("peek").stderr, run("peek").stderr)
 
     procs = [subprocess.Popen(["bash", str(script), "next"], stdout=subprocess.PIPE, text=True,
                               env=env) for _ in range(2)]
     got = sorted(int(p.communicate()[0].strip()) for p in procs)
-    check("ledger-round: two concurrent allocations give two different numbers",
-          len(set(got)) == 2, str(got))
-    check("ledger-round: the concurrent numbers are adjacent", got == [1, 2], str(got))
+    check("ledger-round: two concurrent allocations are different and adjacent", got == [1, 2], str(got))
 
-    pinned = run("reuse", "7")
-    check("ledger-round: reuse pins the counter", pinned.stdout.strip() == "7", pinned.returncode)
+    check("ledger-round: reuse pins the counter", run("reuse", "7").stdout.strip() == "7")
     check("ledger-round: peek stays stable after reuse",
           run("peek").stdout.strip() == "7" and run("peek").stdout.strip() == "7")
 
-    # `detect` records the payload on disk and writes nothing to the ledger: an issue-metadata JSON
-    # dump is unreadable to the person the ledger is for, so the ledger gets one human entry per round.
+    # A counter that cannot be parsed is a truncated write, not "nothing allocated yet".
+    (work / "round.current").write_text("abc\n")
+    corrupt = run("peek")
+    check("ledger-round: a corrupt counter is refused instead of renumbering",
+          corrupt.returncode == 2 and "not a non-negative integer" in corrupt.stderr,
+          "rc=%s %s" % (corrupt.returncode, corrupt.stderr[-120:]))
+    (work / "round.current").write_text("7\n")
+
+    # detect keeps the payload on disk and writes nothing to the ledger: an issue-metadata dump is
+    # unreadable to the person the ledger is for.
     raw = BASE / "ledger-round-raw.json"
     raw.write_text('{"number": 1}\n')
-    detected = subprocess.run(["bash", str(script), "detect", str(raw)], capture_output=True,
-                              text=True, env={**env, "IW_LEDGER": ""}, timeout=60)
-    check("ledger-round: detect succeeds without a ledger (nothing to append)",
-          detected.returncode == 0, detected.stderr[-200:])
-    kept = sorted(work.glob("round-*.raw.json"))
-    check("ledger-round: detect keeps the payload on disk for the agent",
-          bool(kept) and kept[0].read_text().strip() == '{"number": 1}', str(kept))
+    detected = run("detect", str(raw))
+    check("ledger-round: detect succeeds without a ledger and keeps the payload",
+          detected.returncode == 0 and bool(list(work.glob("round-*.raw.json"))),
+          detected.stderr[-160:])
 
-    # A written entry, on the other hand, needs an address: refusing is better than appending nowhere.
     body = BASE / "ledger-round-body.md"
     body.write_text("x\n")
-    refused = subprocess.run(["bash", str(script), "record", "t", str(body)], capture_output=True,
-                             text=True, env={**env, "IW_LEDGER": ""}, timeout=60)
-    check("ledger-round: a record with no ledger is refused",
-          refused.returncode != 0 and "IW_LEDGER" in (refused.stderr or ""), refused.stderr[-200:])
+
+    # A failed append must not consume a round: the number is unrecoverable otherwise.
+    failing = BASE / "ledger-round-failhk"
+    failing.write_text('#!/bin/bash\necho "hk: session not found" >&2\nexit 1\n')
+    failing.chmod(0o755)
+    before = (work / "round.current").read_text().strip()
+    bad = run("record", "append fails", str(body), IW_HK=str(failing), IW_LEDGER="fake")
+    kept = list(work.glob("round-*-record.md"))
+    check("ledger-round: a failed append exits non-zero and keeps the entry",
+          bad.returncode == 3 and bool(kept), "rc=%s %s" % (bad.returncode, bad.stderr[-160:]))
+    check("ledger-round: a failed append does not consume the round",
+          (work / "round.current").read_text().strip() == before,
+          "%s != %s" % ((work / "round.current").read_text().strip(), before))
+
+    # Two records in a row are two rounds: the same number twice makes the ledger ambiguous.
+    for leftover in kept:
+        leftover.unlink()
+    slow = BASE / "ledger-round-slowhk"
+    slow.write_text('#!/bin/bash\nfor a in "$@"; do case "$a" in *round-*-record.md) '
+                    'basename "$a" | sed "s/round-\\([0-9]*\\)-record.md/\\1/" '
+                    '>> "' + str(work / "order.log") + '";; esac; done\nsleep 0.3\n')
+    slow.chmod(0o755)
+    a = subprocess.Popen(["bash", str(script), "record", "first", str(body)], env={**env, "IW_HK": str(slow), "IW_LEDGER": "fake"},
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    time.sleep(0.1)
+    b = subprocess.Popen(["bash", str(script), "record", "second", str(body)], env={**env, "IW_HK": str(slow), "IW_LEDGER": "fake"},
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    a.wait(); b.wait()
+    order = [int(x) for x in (work / "order.log").read_text().split()]
+    check("ledger-round: two records are two rounds, appended in number order",
+          len(order) == 2 and len(set(order)) == 2 and order == sorted(order), str(order))
+
+    # A counter in a second conventional location is a second numbering; it cannot be seen from the
+    # output, so the allocator has to say it.
+    split_home = BASE / "ledger-split-home"
+    (split_home / "cron" / "state" / "hawkeye-ledger").mkdir(parents=True)
+    (split_home / "cron" / "state" / "hawkeye-ledger" / "round.current").write_text("5\n")
+    split_env = {**ENV, "HERMES_HOME": str(split_home)}
+    split = subprocess.run(["bash", str(script), "peek"], capture_output=True, text=True,
+                           env={k: v for k, v in split_env.items() if k != "IW_STATE_DIR"}, timeout=60)
+    check("ledger-round: a counter in another location is reported, not silently restarted",
+          "found one in" in (split.stderr or "") and "(5)" in (split.stderr or ""),
+          (split.stderr or "")[-200:])
 
 
 def test_report_can_append_to_one_ledger_child() -> None:

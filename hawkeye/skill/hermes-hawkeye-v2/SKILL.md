@@ -183,7 +183,8 @@ one model, treat the first two as mandatory.
   a monitor stopped without saying so in the chat.
 - **A round is numbered, and the source window gets three lines.** Every cycle is one ledger entry
   titled `第 N 轮 · <one-line conclusion>`; the number is allocated by
-  `config/scripts/ledger-round.sh` (`peek` / `next` / `reuse N` / `detect` / `record`), never by hand,
+  `$HERMES_HOME/scripts/ledger-round.sh` (shipped as `config/scripts/ledger-round.sh`) —
+  `peek` / `next` / `reuse N` / `detect` / `record` — never by hand,
   so a cron tick, a wake turn and a human agree on which round they are in. The detail — what was said,
   what changed, how it was verified, the commit, the reply link — lives only in that entry. The
   conversation that owns the wake gets a short summary and a pointer to the round: long reports belong
@@ -543,5 +544,7 @@ sandbox-testing `install.sh` with a stub CLI, verifying a push through the API i
 can break) is in `references/kernel-surfaces.md`. Reporting into the conversation that started
 the work — TTL shape, wake latency, the report-cadence trap, child-session reports, proving no new
 session window appeared, and the stop/pgrep pitfalls — is in `references/in-session-watch.md`.
-A numbered, language-consistent ledger entry is written with `config/scripts/ledger-round.sh`
-(`detect` allocates the round, `record` reuses it, `peek`/`next`/`reuse N` are the raw verbs).
+A numbered, language-consistent ledger entry is written with `$HERMES_HOME/scripts/ledger-round.sh`
+(shipped from `config/scripts/ledger-round.sh`): `detect` allocates the round and keeps the payload on
+ disk, `record` writes the one human-readable entry for it, `peek`/`next`/`reuse N` are the raw verbs.
+ Every call prints its state path and round number to stderr.

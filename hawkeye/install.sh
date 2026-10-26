@@ -304,6 +304,19 @@ elif [ -d "$REPO_DIR/skill/hermes-hawkeye-v2" ]; then
             die "skill install incomplete: SKILL.md points at $ref but it was not installed"
         fi
     done
+    # SKILL.md is the one document copied *out* of the checkout, so a path it names must be installed
+    # too: a fresh host otherwise had a rule pointing at a script that existed only in the repository
+    # (issue #17, and the report that followed it).
+    mkdir -p "$HERMES_HOME/scripts"
+    for tool in ledger-round.sh; do
+        install -m 755 "$REPO_DIR/config/scripts/$tool" "$HERMES_HOME/scripts/$tool"
+    done
+    for tool in $(grep -o 'config/scripts/[A-Za-z0-9._-]*\.sh' "$REPO_DIR/skill/hermes-hawkeye-v2/SKILL.md" | sort -u); do
+        if [ ! -x "$HERMES_HOME/scripts/$(basename "$tool")" ]; then
+            die "skill install incomplete: SKILL.md points at $tool but it was not installed"
+        fi
+    done
+    note "helpers installed to $HERMES_HOME/scripts/: $(ls -1 "$HERMES_HOME/scripts" | tr '\n' ' ')"
     note "installed to $SKILL_DEST/ (SKILL.md + references/)"
 else
     note "repository has no skill/ directory, nothing to install"
