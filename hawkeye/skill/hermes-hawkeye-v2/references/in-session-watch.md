@@ -118,3 +118,8 @@ Keep the wake in place when you add the child session: the child is the record, 
 notification, and a user who is not looking at the sidebar still needs to be told. `--rotate-bytes`
 bounds the inbox by archiving it at startup -- never mid-watch, or rotation itself looks like the
 change that triggers a wake.
+
+A report is always a **child** session of the one that armed the work; `hk report` refuses a
+missing parent instead of minting a top-level window. That is not a limitation to work around: a
+tool that can create top-level sessions every night leaves its user triaging windows, and detached
+conversations are a decision the person makes, not something a background job decides for them.

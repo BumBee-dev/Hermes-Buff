@@ -273,6 +273,11 @@ work appears. A background producer can use the same shape for its reports:
 hk report --parent <session-id> --file <report.md> --title "hawkeye triage report"
 ```
 
+It is always a *child*: there is no "no parent" mode, and a parent that does not exist is refused
+rather than turned into a new top-level session. An unattended run that mints its own windows
+leaves a user triaging the sidebar after every night of work, which is the opposite of a report.
+Detached conversations stay a decision made by a person in the UI.
+
 It writes through the kernel's own ``SessionDB`` (the class the CLI and the WebUI use), never
 hand-written SQL, so the session row, its counters and its message store stay consistent with the
 release running on the host. The result is browsable and attributable: nested under the session

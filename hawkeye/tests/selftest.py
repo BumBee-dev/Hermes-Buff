@@ -855,6 +855,22 @@ def test_report_creates_a_child_session() -> None:
     check("report: the child is named after the title",
           bool(rows) and rows[0][2] == "child report", str(rows[:1]))
 
+    # A report is always a child. There is no mode that mints a top-level session, because an
+    # unattended run that does that fills the sidebar with windows the user has to triage by hand.
+    bad = subprocess.run([sys.executable, str(HK), "report", "--parent", "no-such-session",
+                          "--file", str(body), "--title", "orphan attempt"],
+                         capture_output=True, text=True, env=env, timeout=120)
+    reader_after = (
+        "import sqlite3\n"
+        "c = sqlite3.connect(%r)\n"
+        "print(c.execute(\"select count(*) from sessions\").fetchone()[0])\n"
+        % str(home / "state.db")
+    )
+    total = subprocess.run([sys.executable, "-c", reader_after], capture_output=True,
+                           text=True, timeout=60).stdout.strip()
+    check("report: a missing parent is refused instead of becoming a new session",
+          bad.returncode != 0 and total == "2", "rc=%s sessions=%s" % (bad.returncode, total))
+
 
 def test_state_writes_cannot_resurrect_a_finished_run() -> None:
     """Progress writes and the stop verdict must not interleave into a resurrected run.

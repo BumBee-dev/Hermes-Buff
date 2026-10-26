@@ -78,11 +78,18 @@ def write_child(parent: str, title: str, body: str, *, source: str = "hawkeye") 
     that only exists to report can let it fail.
     """
     if not (parent or "").strip():
-        raise ValueError("a parent session id is required")
+        # There is deliberately no "no parent" mode: a report is always a child of the session
+        # that asked for the work. A tool that can mint top-level sessions fills the sidebar with
+        # windows a user has to triage by hand after every unattended run, which is the opposite
+        # of what a report is for. Detached conversations stay a user decision made in the UI.
+        raise ValueError("a parent session id is required (reports are always child sessions)")
     db_cls = _session_db_class()
     sid = child_id()
     db = db_cls()
     try:
+        if db.get_session(parent.strip()) is None:
+            raise ValueError("parent session %s does not exist; refusing to write an orphan report"
+                             % parent.strip())
         db.create_session(
             sid,
             source=source,
