@@ -140,9 +140,27 @@ After being woken: `kanban_show` to read the output → judge against the card's
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `HAWKEYE_PYTHON` | the `python3` on `PATH` | Interpreter hk re-execs into, once. Set it when the system python is older than 3.11 or incomplete; point it at Hermes' environment python. |
+| `HAWKEYE_PYTHON` | discovered (see below) | Interpreter hk re-execs into, once. An explicit value wins over discovery. |
 | `HAWKEYE_KERNEL_SRC` | unset | Hermes source checkout, so `hermes_cli.kanban_db` can be imported for board paths |
 | `HAWKEYE_NO_KERNEL` | unset | `1` forces the portable fallback even when the kernel is importable — used by the tests, and handy when diagnosing |
+
+**Which interpreter runs hk.** The entry point is `#!/usr/bin/env python3`, so it starts under
+whatever `python3` the caller's `PATH` resolves to, and only replaces itself if that one is too old.
+The order is:
+
+1. `HAWKEYE_PYTHON` when set — an explicit answer always wins;
+2. otherwise, if the current interpreter is **older than 3.11**, hk looks for one inside Hermes:
+   `<HERMES_HOME>/tools/python-*/bin/python3` first, then
+   `<HERMES_HOME>/installs/*/environments/*/venv/bin/python3` (newest first), launching each
+   candidate to prove it imports `tomllib` and `sqlite3`. Broken environments — half-built venvs,
+   dangling symlinks — are skipped because they fail that launch, not because of their name;
+3. if nothing is usable, hk stops with one line naming both places it looked.
+
+That is what makes **Ubuntu 18.04 and Debian 10** (python3 3.6/3.7) work without installing anything
+extra: Hermes brings its own interpreter, and hk borrows it. No path is hardcoded — the install and
+environment hashes change on every `hermes update`, so anything pinned would break exactly when
+supervision matters most. `bin/hk` and `bin/_hk_interp.py` are deliberately kept parseable by python
+3.6, because on such a host they have to *run* to say anything at all (a test asserts this).
 
 hk itself is standard library only (needs 3.11+ for `tomllib`, plus `sqlite3`). The kernel
 import is the one thing that needs third-party modules (`ruamel` among them), and those

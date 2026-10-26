@@ -12,6 +12,7 @@ Covers the three properties the design is built on:
 from __future__ import annotations
 
 import contextlib
+import ast
 import json
 import os
 import re
@@ -1401,6 +1402,57 @@ def test_set_cannot_overwrite_a_stop_verdict() -> None:
           out.strip().startswith("STOPPED"), "out=%r err=%r" % (out.strip()[:80], err.strip()[:200]))
 
 
+def test_hk_finds_a_modern_interpreter_for_an_old_host() -> None:
+    """hk must run on a host whose system python is 3.6 (Ubuntu 18.04, Debian 10).
+
+    The entry point alone cannot save those hosts: it is started by ``/usr/bin/env python3``, so it
+    has to *run* under the old interpreter to say anything. That makes two requirements, both
+    guarded here -- the launcher and its helper stay parseable by 3.6, and the search finds a usable
+    interpreter inside Hermes, by launching each candidate rather than trusting the path.
+    """
+    import importlib.util
+    repo = Path(__file__).resolve().parents[1]
+    for name in ("bin/hk", "bin/_hk_interp.py"):
+        src = (repo / name).read_text()
+        try:
+            ast.parse(src, feature_version=(3, 6))
+            ok, why = True, ""
+        except SyntaxError as exc:
+            ok, why = False, str(exc)
+        check("%s stays parseable by python 3.6" % name, ok, why)
+
+    spec = importlib.util.spec_from_file_location("hkip", repo / "bin" / "_hk_interp.py")
+    assert spec is not None and spec.loader is not None
+    interp = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(interp)
+
+    home = BASE / "old-host-home"
+    good = home / "tools" / "python-3.14.9" / "bin" / "python3"
+    good.parent.mkdir(parents=True)
+    good.symlink_to("/usr/bin/python3")
+    broken = home / "installs" / "x" / "environments" / "y" / "venv" / "bin" / "python3"
+    broken.parent.mkdir(parents=True)
+    broken.symlink_to("/nonexistent/python3")
+
+    env = {**os.environ, "HERMES_HOME": str(home)}
+    listed = interp.candidates(env)
+    check("interp: the tools interpreter is considered first",
+          listed and listed[0] == str(good), str(listed))
+    check("interp: a broken venv is listed but rejected",
+          str(broken) in listed and not interp.usable(str(broken)), str(broken))
+
+    picked = interp.find(env, exclude=sys.executable)
+    same_python = os.path.realpath("/usr/bin/python3") == os.path.realpath(sys.executable)
+    if same_python:
+        print("  SKIP interp: /usr/bin/python3 is the running interpreter; nothing to pick")
+    else:
+        check("interp: a usable candidate is returned, not just the newest path",
+              picked == str(good), str(picked))
+    check("interp: the search names both locations in the failure text",
+          any("tools/python-*" in line for line in interp.describe_searched(env))
+          and any("installs/*/environments" in line for line in interp.describe_searched(env)))
+
+
 def test_report_grace_is_measured_from_the_report() -> None:
     """A long-running run's report must not look like an abandoned one two seconds later (#13).
 
@@ -1614,6 +1666,7 @@ def main() -> int:
                  test_env_driven_install_is_also_a_redirect,
                  test_set_cannot_overwrite_a_stop_verdict,
                  test_a_spelled_out_default_path_is_not_a_redirect,
+                 test_hk_finds_a_modern_interpreter_for_an_old_host,
                  test_report_grace_is_measured_from_the_report,
                  test_a_consumed_report_withdraws_the_incident,
                  test_the_sweep_and_gc_share_one_delivery_grace,

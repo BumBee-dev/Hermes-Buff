@@ -28,7 +28,8 @@
 #                                          created from the example)
 #   HAWKEYE_KERNEL_SRC --kernel-src DIR    Hermes source checkout, for board resolution
 #                                          (default: unset -> the unit omits it)
-#   HAWKEYE_PYTHON     --python BIN        Interpreter hk should run under (default: the
+#   HAWKEYE_PYTHON     --python BIN        Interpreter hk should run under (default: discovered
+#                                          at run time; see bin/_hk_interp.py)
 #                                          python3 on PATH). Set it when the system python
 #                                          is older than 3.11.
 

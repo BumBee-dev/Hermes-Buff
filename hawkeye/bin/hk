@@ -1,21 +1,38 @@
 #!/usr/bin/env python3
 """hk entry point — keeps ``lib/`` importable without installing anything.
 
-Two guards before the real code runs:
+Three guards before the real code runs, in this order:
 
-* **Interpreter override.** ``HAWKEYE_PYTHON`` names the interpreter hk should run
-  under. It exists for hosts whose system ``python3`` is older than 3.11 (no
-  ``tomllib``); point it at any Python >= 3.11, e.g. the one inside Hermes'
-  environment. The re-exec happens once and is guarded, so a bad value cannot loop.
-* **Version check.** hk itself is standard library only, but it does need 3.11+
-  (``tomllib``) and ``sqlite3``. Failing here with one clear line beats a traceback
-  about a missing module three layers deep.
+* **Interpreter override.** ``HAWKEYE_PYTHON`` names the interpreter hk should run under. An explicit
+  answer always wins; the re-exec happens once and is guarded, so a bad value cannot loop.
+* **Interpreter discovery.** hk needs Python >= 3.11 (``tomllib``). Hosts whose system python is
+  older — Ubuntu 18.04 and Debian 10 ship 3.6/3.7 — still have a usable interpreter inside Hermes
+  itself, so instead of failing we look for one (``bin/_hk_interp.py``) and re-exec into it. The
+  search is by capability, never by a hardcoded path: ``HERMES_HOME/tools/python-*`` first, then the
+  per-install environments, and each candidate is actually launched to prove it imports ``tomllib``
+  and ``sqlite3``.
+* **Version check.** If nothing was found, say so once, name what was searched, and stop — that beats
+  a traceback about a missing module three layers deep.
+
+Kept to old syntax on purpose: on a 3.6 host this file has to *run* in order to explain the problem.
 """
 
 import os
 import sys
 
 _REEXEC_FLAG = "HAWKEYE_PY_REEXEC"
+
+
+def _re_exec(interpreter):
+    """Replace this process, once. Falls back to running here if the exec fails."""
+    os.environ[_REEXEC_FLAG] = "1"
+    try:
+        os.execv(interpreter, [interpreter] + sys.argv)
+    except OSError as exc:                       # fall through and run here instead
+        sys.stderr.write("hk: could not re-exec into %s (%s); continuing with %s\n"
+                         % (interpreter, exc, sys.executable))
+        os.environ.pop(_REEXEC_FLAG, None)
+
 
 _wanted = (os.environ.get("HAWKEYE_PYTHON") or "").strip()
 if (
@@ -25,17 +42,31 @@ if (
     and os.access(_wanted, os.X_OK)
     and os.path.realpath(_wanted) != os.path.realpath(sys.executable)
 ):
-    os.environ[_REEXEC_FLAG] = "1"
-    try:
-        os.execv(_wanted, [_wanted] + sys.argv)
-    except OSError as exc:                       # fall through and run here instead
-        sys.stderr.write("hk: could not re-exec into %s (%s); continuing with %s\n"
-                         % (_wanted, exc, sys.executable))
-        os.environ.pop(_REEXEC_FLAG, None)
+    _re_exec(_wanted)
+
+try:
+    import _hk_interp                            # lives next to this file
+except ImportError:
+    _hk_interp = None
+
+if sys.version_info < (3, 11) and os.environ.get(_REEXEC_FLAG) != "1":
+    found = _hk_interp.find(exclude=sys.executable) if _hk_interp else None
+    if found:
+        sys.stderr.write("hk: %s is python %d.%d, which is too old; using %s instead\n"
+                         % (sys.executable, sys.version_info[0], sys.version_info[1], found))
+        _re_exec(found)
 
 if sys.version_info < (3, 11):
-    sys.exit("hk: needs Python >= 3.11 (found %d.%d at %s); set HAWKEYE_PYTHON to a newer interpreter"
-             % (sys.version_info[0], sys.version_info[1], sys.executable))
+    searched = _hk_interp.describe_searched() if _hk_interp else []
+    sys.stderr.write("hk: needs Python >= 3.11 (found %d.%d at %s)\n"
+                     % (sys.version_info[0], sys.version_info[1], sys.executable))
+    if searched:
+        sys.stderr.write("hk: searched for one inside Hermes and found nothing usable:\n")
+        for line in searched:
+            sys.stderr.write("      %s\n" % line)
+    sys.stderr.write("hk: install python3.11+, or set HAWKEYE_PYTHON to any Python >= 3.11\n")
+    sys.exit(1)
+
 try:
     import sqlite3  # noqa: F401
     import tomllib   # noqa: F401
