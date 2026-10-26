@@ -59,6 +59,29 @@ _read_counter() {
   CURRENT=$n
 }
 
+# The ledger has two writers: this script, and anyone (a wake turn, a human, another agent) calling
+# `hk report --into` directly. `round.closed` only knows about the first kind, so the highest round
+# actually present in the ledger is read too -- otherwise a record happily writes 第 5 轮 twice
+# because it cannot see the 第 6 轮 somebody else appended.
+_ledger_max() {
+  [ -n "${IW_LEDGER:-}" ] || { printf '0'; return 0; }
+  [ -f "${HERMES_HOME:-}/state.db" ] || { printf '0'; return 0; }
+  LEDGER_MAX=$(IW_DB="${HERMES_HOME}/state.db" IW_SID="$IW_LEDGER" "${IW_PYTHON:-python3}" -c '
+import os, re, sqlite3
+try:
+    con = sqlite3.connect("file:%s?mode=ro" % os.environ["IW_DB"], uri=True)
+    best = 0
+    for (text,) in con.execute("select content from messages where session_id = ?", (os.environ["IW_SID"],)):
+        for n in re.findall(r"第\s*(\d+)\s*轮", text or ""):
+            best = max(best, int(n))
+    print(best)
+except Exception:
+    print(0)
+' 2>/dev/null)
+  case "${LEDGER_MAX:-}" in ''|*[!0-9]*) LEDGER_MAX=0 ;; esac
+  printf '%s' "$LEDGER_MAX"
+}
+
 _lock() { exec 9>>"$LOCK"; flock 9; }
 _unlock() { flock -u 9; exec 9>&-; }
 
@@ -67,6 +90,9 @@ _unlock() { flock -u 9; exec 9>&-; }
 _alloc() {
   _lock
   _read_counter
+  local lmax
+  lmax=$(_ledger_max)
+  [ "$lmax" -gt "$CURRENT" ] && CURRENT=$lmax
   CURRENT=$((CURRENT + 1))
   printf '%s\n' "$CURRENT" > "$COUNTER"
   _unlock
@@ -134,10 +160,13 @@ case "${1:-}" in
     closed=0
     [ -f "$CLOSED" ] && closed=$(tr -d '[:space:]' < "$CLOSED" 2>/dev/null)
     case "$closed" in ''|*[!0-9]*) closed=0 ;; esac
-    if [ "$CURRENT" -eq 0 ] || [ "$closed" -ge "$CURRENT" ]; then
-      # Either nothing was allocated yet, or this round already has its entry (two records in a row
-      # would otherwise both be written as "第 19 轮", making the ledger ambiguous). A new round is
-      # the honest answer in both cases: one entry per round.
+    lmax=$(_ledger_max)
+    if [ "$CURRENT" -eq 0 ] || [ "$closed" -ge "$CURRENT" ] || [ "$lmax" -ge "$CURRENT" ]; then
+      # Either nothing was allocated yet, this round already has its entry, or somebody else (a wake
+      # turn, a human, another agent) already appended this number through `hk report --into`. A new
+      # round is the honest answer in all three cases: one entry per round, and never below the ledger.
+      [ "$closed" -gt "$CURRENT" ] && CURRENT=$closed
+      [ "$lmax" -gt "$CURRENT" ] && CURRENT=$lmax
       CURRENT=$((CURRENT + 1))
       printf '%s\n' "$CURRENT" > "$COUNTER"
     fi

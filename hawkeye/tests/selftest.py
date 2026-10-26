@@ -1173,6 +1173,42 @@ def test_ledger_round_allocator_is_shipped_and_serialised() -> None:
     check("ledger-round: two records are two rounds, appended in number order",
           len(order) == 2 and len(set(order)) == 2 and order == sorted(order), str(order))
 
+    # The ledger has a second writer: anyone calling `hk report --into` directly. A record that only
+    # consults its own `round.closed` then writes a number that already exists (reported as a "1,2,3,4,5,5"
+    # ledger), so the highest round actually present in the session is read as well.
+    foreign_home = BASE / "ledger-foreign-home"
+    foreign_home.mkdir()
+    con = sqlite3.connect(str(foreign_home / "state.db"))
+    con.execute("create table messages (id integer primary key, session_id text, content text)")
+    for n in (3, 7):
+        con.execute("insert into messages(session_id, content) values (?, ?)",
+                    ("led", "## 第 %d 轮 · written by someone else\n\nx" % n))
+    con.commit(); con.close()
+    (foreign_home / "round.current").write_text("5\n")
+    (foreign_home / "round.closed").write_text("5\n")
+    stub = foreign_home / "stub-hk"
+    stub.write_text('#!/bin/bash\nfor a in "$@"; do case "$a" in *record.md) '
+                    'basename "$a" >> "' + str(foreign_home / "seen.log") + '";; esac; done\n')
+    stub.chmod(0o755)
+    fenv = {**ENV, "IW_STATE_DIR": str(foreign_home), "HERMES_HOME": str(foreign_home),
+            "IW_LEDGER": "led", "IW_HK": str(stub)}
+    subprocess.run(["bash", str(script), "record", "after a foreign append", str(body)],
+                   env=fenv, capture_output=True, text=True, timeout=60)
+    seen = (foreign_home / "seen.log").read_text().strip() if (foreign_home / "seen.log").exists() else ""
+    check("ledger-round: a record never reuses a round that is already in the ledger",
+          "round-8-record.md" in seen, seen or "(nothing written)")
+
+    # Same rule for allocation: `detect` must not hand out a number the ledger already contains.
+    (foreign_home / "seen.log").unlink(missing_ok=True)
+    raw2 = BASE / "ledger-foreign-raw.json"
+    raw2.write_text('{"n": 2}\n')
+    (foreign_home / "round.current").write_text("5\n")
+    subprocess.run(["bash", str(script), "detect", str(raw2)], env=fenv, capture_output=True,
+                   text=True, timeout=60)
+    check("ledger-round: allocation starts above the ledger, not above its own counter",
+          (foreign_home / "round.current").read_text().strip() == "8",
+          (foreign_home / "round.current").read_text().strip())
+
     # A counter in a second conventional location is a second numbering; it cannot be seen from the
     # output, so the allocator has to say it.
     split_home = BASE / "ledger-split-home"
