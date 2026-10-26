@@ -1172,6 +1172,16 @@ def test_ledger_round_allocator_is_shipped_and_serialised() -> None:
     order = [int(x) for x in (work / "order.log").read_text().split()]
     check("ledger-round: two records are two rounds, appended in number order",
           len(order) == 2 and len(set(order)) == 2 and order == sorted(order), str(order))
+    # The state update must happen inside the same critical section as the append: it used to run after
+    # `_unlock`, so the first caller overwrote `closed` with its older number once a second record had
+    # taken the next round in that gap (reported as #19, silent until a heading is lost).
+    check("ledger-round: a concurrent record cannot leave closed behind the last written round",
+          (work / "round.closed").read_text().strip() == str(max(order))
+          and (work / "round.current").read_text().strip() == str(max(order)),
+          "closed=%s counter=%s max=%s" % ((work / "round.closed").read_text().strip(),
+                                           (work / "round.current").read_text().strip(), max(order)))
+    leftovers = sorted(p.name for p in work.glob("*.tmp.*"))
+    check("ledger-round: state writes leave no temp files behind", leftovers == [], str(leftovers))
 
     # The ledger has a second writer: anyone calling `hk report --into` directly. A record that only
     # consults its own `round.closed` then writes a number that already exists (reported as a "1,2,3,4,5,5"

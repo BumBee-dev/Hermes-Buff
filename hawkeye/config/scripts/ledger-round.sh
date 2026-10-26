@@ -119,6 +119,12 @@ _read_closed() {
   CLOSED_VALUE=$n
 }
 
+# Rename instead of truncate-then-write: `peek` takes no lock, and a truncating write lets an overlapping
+# peek read '' or a prefix of the new number. Advisory only, but it is two lines.
+_write_value() {
+  printf '%s\n' "$2" > "$1.tmp.$$" && mv -f "$1.tmp.$$" "$1"
+}
+
 _lock() { exec 9>>"$LOCK"; flock 9; }
 _unlock() { flock -u 9; exec 9>&-; }
 
@@ -136,7 +142,7 @@ _alloc() {
   [ "$closed" -gt "$CURRENT" ] && CURRENT=$closed
   [ "$lmax" -gt "$CURRENT" ] && CURRENT=$lmax
   CURRENT=$((CURRENT + 1))
-  printf '%s\n' "$CURRENT" > "$COUNTER"
+  _write_value "$COUNTER" "$CURRENT"
   _unlock
 }
 
@@ -148,7 +154,7 @@ _pin() {
   # `detect` (reuse 20, then detect -> 21 on a ledger holding 1..6). `peek` overlays the pin so the
   # caller still sees it, and `record` consumes it.
   if [ "$CURRENT" -gt 0 ]; then
-    printf '%s\n' "$CURRENT" > "$PINNED"
+    _write_value "$PINNED" "$CURRENT"
   else
     rm -f "$PINNED"
   fi
@@ -259,7 +265,7 @@ case "${1:-}" in
       [ "$closed" -gt "$CURRENT" ] && CURRENT=$closed
       [ "$lmax" -gt "$CURRENT" ] && CURRENT=$lmax
       CURRENT=$((CURRENT + 1))
-      printf '%s\n' "$CURRENT" > "$COUNTER"
+      _write_value "$COUNTER" "$CURRENT"
     fi
     entry="$STATE_DIR/round-$CURRENT-record.md"
     {
@@ -272,15 +278,16 @@ case "${1:-}" in
       echo "ledger-round: report failed; entry kept at $entry (round $CURRENT is allocated)" >&2
       exit 3
     fi
-    _unlock
-    # "The last round that already has an entry" can only move forward; writing it unconditionally let a
-    # lower pin pull it back and re-open the rewind.
+    # The state update belongs inside the critical section: releasing the lock first let a second
+    # `record` allocate the next round in the gap, and this caller then overwrote `closed` with its
+    # older number -- the retreat `1c754a9` forbids, and the "32 before 31" symptom the header cites.
+    # A failed report still leaves above this block, so "append failed -> round not consumed" holds.
     if [ "$CURRENT" -gt "$closed" ]; then
-      printf '%s\n' "$CURRENT" > "$CLOSED"
+      _write_value "$CLOSED" "$CURRENT"
     fi
-    # The counter has to move with the write as well, or the next `peek` reports the pre-pin value.
-    printf '%s\n' "$CURRENT" > "$COUNTER"
+    _write_value "$COUNTER" "$CURRENT"
     rm -f "$PINNED"          # a pin is consumed by the write it described
+    _unlock
     rm -f "$entry"
     _say
     ;;
