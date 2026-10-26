@@ -1498,6 +1498,12 @@ def test_ledger_concurrent_records_hold_the_invariants_an_outside_reader_can_see
     No sleep, no clock, no widening. On the fixed code these invariants hold for every schedule,
     which is the difference between an invariant and a race reproduction: a race test that fails
     once in a while teaches people to rerun instead of read.
+
+    The tallies printed at the end are wall-clock, not an arm: the observer samples only while the
+    records run, so the same merge has printed 9163, 14304 and 14925 lock-free samples on three
+    boxes. No assertion reads the tally except `> 100`, which says only that the observer ran -- a
+    smaller number is a busier box, not a weaker invariant. Read the retreat/tear field and the
+    "record N, not N-1" headings, never the count.
     """
     script = Path(__file__).resolve().parents[1] / "config" / "scripts" / "ledger-round.sh"
     check("ledger-concurrency: the allocator ships in the tree", script.is_file(), str(script))
@@ -1583,6 +1589,9 @@ def test_ledger_lock_free_peek_never_reads_a_half_written_state() -> None:
     only the number of observations is raised: N allocations while a reader samples the counter
     without the lock, plus the shipped `peek` itself every fourth allocation. Raise
     HAWKEYE_LEDGER_PROBE_SAMPLES for a stress run.
+
+    The read count is wall-clock for the same reason (53927 / 69435 / 69618 on the same merge); the
+    `> 1000` floor is asserted only to prove the reader ran, so a busy box is not a regression.
     """
     script = Path(__file__).resolve().parents[1] / "config" / "scripts" / "ledger-round.sh"
     check("ledger-torn-read: the allocator ships in the tree", script.is_file(), str(script))
