@@ -23,15 +23,40 @@ import sys
 _REEXEC_FLAG = "HAWKEYE_PY_REEXEC"
 
 
+try:
+    import _hk_interp                            # lives next to this file
+except ImportError:
+    _hk_interp = None
+
+
+def _clean_env():
+    """The environment to hand a new interpreter: ours, minus what changes who it claims to be.
+
+    ``os.execv`` passes the caller's environment through untouched, so a stray PYTHONPATH -- the
+    normal state inside a cron wrapper or a CI step -- was inherited by the re-executed hk, which
+    then rejected *itself*: the discovery step found a good interpreter, exec'd into it, and the new
+    process reported 3.7 because the caller's sitecustomize said so. Measured before this change:
+    ``PYTHONPATH=<liar> /usr/bin/python3 ./bin/hk gate-check`` -> "needs Python >= 3.11 (found 3.7)".
+    """
+    if _hk_interp is not None:
+        return _hk_interp._probe_env()
+    env = dict(os.environ)
+    for key in ("PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP"):
+        env.pop(key, None)
+    return env
+
+
 def _re_exec(interpreter):
     """Replace this process, once. Falls back to running here if the exec fails."""
-    os.environ[_REEXEC_FLAG] = "1"
+    env = _clean_env()
+    # The guard goes into the *new* environment only: putting it in os.environ as well would be a
+    # second source of truth for "did the re-exec happen", and the child is the one that needs it.
+    env[_REEXEC_FLAG] = "1"
     try:
-        os.execv(interpreter, [interpreter] + sys.argv)
+        os.execve(interpreter, [interpreter] + sys.argv, env)
     except OSError as exc:                       # fall through and run here instead
         sys.stderr.write("hk: could not re-exec into %s (%s); continuing with %s\n"
                          % (interpreter, exc, sys.executable))
-        os.environ.pop(_REEXEC_FLAG, None)
 
 
 _wanted = (os.environ.get("HAWKEYE_PYTHON") or "").strip()
@@ -44,17 +69,20 @@ if (
 ):
     _re_exec(_wanted)
 
-try:
-    import _hk_interp                            # lives next to this file
-except ImportError:
-    _hk_interp = None
-
 if sys.version_info < (3, 11) and os.environ.get(_REEXEC_FLAG) != "1":
     found = _hk_interp.find(exclude=sys.executable) if _hk_interp else None
     if found:
         sys.stderr.write("hk: %s is python %d.%d, which is too old; using %s instead\n"
                          % (sys.executable, sys.version_info[0], sys.version_info[1], found))
         _re_exec(found)
+    elif _hk_interp is not None and _hk_interp.usable(sys.executable):
+        # Excluding the running interpreter is right in the normal case, but when it *lies* about
+        # its version the only usable candidate is the binary we are already in. Re-exec into it
+        # with a clean environment: the version we reported was the environment's, not its own.
+        sys.stderr.write("hk: %s reports python %d.%d, but the interpreter itself is usable;"
+                         " re-running under a clean environment\n"
+                         % (sys.executable, sys.version_info[0], sys.version_info[1]))
+        _re_exec(sys.executable)
 
 if sys.version_info < (3, 11):
     searched = _hk_interp.describe_searched() if _hk_interp else []

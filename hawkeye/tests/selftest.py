@@ -983,6 +983,43 @@ def test_issue_watch_reports_replies_on_closed_issues() -> None:
           bool(items) and any(c["id"] == 2 for c in items[0]["new_comments"]), str(items[:1])[:200])
 
 
+def test_hk_survives_a_lying_pythonpath_across_the_reexec() -> None:
+    """End-to-end: the *re-executed* hk must work under a hostile PYTHONPATH, not just the probe.
+
+    `_probe_env()` cleaned the probe child, which made the module-level checks green while the CLI
+    was still red: `_re_exec()` used `os.execv`, so the caller's environment went straight to the new
+    interpreter and the re-executed hk rejected itself ("needs Python >= 3.11 (found 3.7)") on a host
+    whose interpreter was fine. Reported with that exact asymmetry, hence an end-to-end assertion:
+    run bin/hk as a subprocess with the lying PYTHONPATH and require rc=0.
+    """
+    fake = BASE / "lying-pythonpath"
+    fake.mkdir()
+    (fake / "sitecustomize.py").write_text(
+        "import sys\nsys.version_info = (3, 7, 0, 'final', 0)\n")
+
+    env = {**ENV, "PYTHONPATH": str(fake)}
+    for key in ("HAWKEYE_PYTHON", "HAWKEYE_PY_REEXEC"):
+        env.pop(key, None)
+
+    proc = subprocess.run([sys.executable, str(HK), "gate-check"], capture_output=True,
+                          text=True, env=env, timeout=180)
+    out = (proc.stdout or "") + (proc.stderr or "")
+    check("reexec: hk gate-check still runs under a lying PYTHONPATH", proc.returncode == 0,
+          "rc=%s %s" % (proc.returncode, out[-300:]))
+    check("reexec: the re-executed process does not reject itself",
+          "needs Python >= 3.11" not in out, out[-300:])
+    check("reexec: it says which interpreter it moved to", "which is too old; using" in out
+          or "clean environment" in out, out[-300:])
+
+    # The explicit override takes the same path (`_re_exec`), so it must survive the same lie.
+    override = {**env, "HAWKEYE_PYTHON": sys.executable}
+    proc2 = subprocess.run(["/usr/bin/python3", str(HK), "gate-check"], capture_output=True,
+                           text=True, env=override, timeout=180)
+    out2 = (proc2.stdout or "") + (proc2.stderr or "")
+    check("reexec: an explicit HAWKEYE_PYTHON override survives the same lie",
+          proc2.returncode == 0, "rc=%s %s" % (proc2.returncode, out2[-300:]))
+
+
 def test_report_can_append_to_one_ledger_child() -> None:
     """A recurring producer must be able to keep writing into the *same* child session.
 
@@ -1919,6 +1956,7 @@ def main() -> int:
                  test_state_writes_cannot_resurrect_a_finished_run,
                  test_report_creates_a_child_session,
                  test_interpreter_probe_ignores_a_hostile_pythonpath,
+                 test_hk_survives_a_lying_pythonpath_across_the_reexec,
                  test_issue_watch_reports_replies_on_closed_issues,
                  test_report_can_append_to_one_ledger_child,
                  test_kernel_branch_resolves_board_paths,

@@ -162,6 +162,17 @@ environment hashes change on every `hermes update`, so anything pinned would bre
 supervision matters most. `bin/hk` and `bin/_hk_interp.py` are deliberately kept parseable by python
 3.6, because on such a host they have to *run* to say anything at all (a test asserts this).
 
+**A lying environment must not be able to break either step.** Both the probe and the re-exec launch a
+child, and both used to inherit the caller's `PYTHONPATH`/`PYTHONHOME`, so a `sitecustomize` that
+reports an old version made a healthy host report "found nothing usable" — and, worse, after the fix
+to the probe alone, the *re-executed* hk rejected itself with `needs Python >= 3.11 (found 3.7)` while
+the CLI was demonstrably fine. `_probe_env()` is now the single strip (three keys) and the re-exec uses
+`os.execve` with that cleaned dict plus its guard flag, so the verdict — and the process that runs the
+work — are about the interpreter, not about the shell that invoked `hk`. Cron wrappers and CI steps are
+exactly where a stray `PYTHONPATH` lives, and the regression test is end-to-end (run `bin/hk` as a
+subprocess under the lie and require rc=0), because a module-level assertion stayed green while the
+CLI was still red.
+
 hk itself is standard library only (needs 3.11+ for `tomllib`, plus `sqlite3`). The kernel
 import is the one thing that needs third-party modules (`ruamel` among them), and those
 live in the Hermes **environment's** `site-packages`, not in any interpreter: hk boots
