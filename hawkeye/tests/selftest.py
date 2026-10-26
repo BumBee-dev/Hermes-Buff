@@ -902,13 +902,22 @@ def test_state_writes_cannot_resurrect_a_finished_run() -> None:
         "n = 0\n"
         "while time.time() < end:\n"
         "    n += 1\n"
-        "    store.update_state(rd, {'attempts_done': n})\n"
+        "    store.update_json(rd / 'state.json', {'attempts_done': n})\n"
         "print(n)\n" % (str(Path(__file__).resolve().parents[1] / "lib"), str(rd))
     )
-    proc = subprocess.Popen([sys.executable, "-c", writer], stdout=subprocess.PIPE, text=True)
+    # A test that cannot fail is worse than a missing one: this writer used to call a function that
+    # does not exist, so the child died before its first write, no concurrency ever happened, and
+    # both assertions passed on a state file nobody had touched (#11). The child's own liveness is
+    # therefore part of the assertion: it must exit 0, write silently, and have looped many times.
+    proc = subprocess.Popen([sys.executable, "-c", writer], stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True)
     time.sleep(0.4)
     store.update_json(rd / "state.json", {"finished": True, "finish_reason": "stopped"})
-    proc.communicate(timeout=30)
+    out, err = proc.communicate(timeout=30)
+    writes = int(out.strip() or 0) if out.strip().isdigit() else 0
+    check("state race: the writer really ran", proc.returncode == 0 and not err.strip()
+          and writes > 100,
+          "rc=%s writes=%s stderr=%r" % (proc.returncode, writes, err.strip()[:200]))
 
     final = store.read_json(rd / "state.json", {}) or {}
     check("state race: the stop verdict survives concurrent progress writes",
