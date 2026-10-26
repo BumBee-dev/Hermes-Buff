@@ -899,6 +899,43 @@ def test_state_writes_cannot_resurrect_a_finished_run() -> None:
           after.get("finished") is True and after.get("finish_reason") == "stopped", str(after))
 
 
+def test_per_run_report_interval_overrides_the_host_setting() -> None:
+    """A quiet watcher must not inherit a build job's progress cadence.
+
+    ``report_interval_seconds`` is a host knob (30 minutes in a production config): a job that
+    prints steadily wants it, a watcher that prints nothing for hours does not -- it turns into
+    "wake the session every 30 minutes to say nothing happened", and every one of those wakes also
+    ends the phase and orphans the job. ``hk run --report-interval`` scopes the knob to the run,
+    and 0 disables the periodic report entirely.
+    """
+    conf = cfg("ri", report_interval_seconds=999, attempts=1)
+    slow = script("ri.sh", "#!/bin/bash\nsleep 6\n")
+    rid = "ri-fast"
+    hk(["run", "--id", rid, "--report-interval", "0.6", "--", "/bin/bash", str(slow)], conf)
+    # A "running" report is not a terminal state, so there is no result.json: the evidence is the
+    # report it emitted and the counter it bumped.
+    state = read(rid, "state.json") or {}
+    report_path = RUNS / rid / "report.md"
+    emitted = report_path.read_text() if report_path.is_file() else ""
+    check("interval: a per-run override reports early",
+          int(state.get("reports") or 0) == 1 and "running" in emitted, str(state))
+
+    rid2 = "ri-off"
+    env = {**ENV, "HAWKEYE_V2_CONFIG": str(conf)}
+    proc = subprocess.Popen([sys.executable, str(HK), "run", "--id", rid2,
+                             "--report-interval", "0", "--", "/bin/bash", str(slow)],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
+    time.sleep(2.0)
+    still_running = proc.poll() is None
+    check("interval: 0 disables the periodic report", still_running,
+          "the phase exited on the timer instead of staying quiet")
+    hk(["stop", "--run", rid2], conf)
+    try:
+        proc.wait(timeout=15)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+
+
 def test_kernel_branch_resolves_board_paths() -> None:
     """With a real checkout, board paths must come from ``kanban_db_path()``.
 
@@ -1075,6 +1112,7 @@ def main() -> int:
                  test_kanban_watcher_reads_default_board,
                  test_named_board_is_not_the_default_board,
                  test_gate_check_reports_ungated_profiles,
+                 test_per_run_report_interval_overrides_the_host_setting,
                  test_state_writes_cannot_resurrect_a_finished_run,
                  test_report_creates_a_child_session,
                  test_kernel_branch_resolves_board_paths,

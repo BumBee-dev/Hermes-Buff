@@ -49,10 +49,13 @@ class _Stopped(Exception):
 
 class Phase:
     def __init__(self, cfg: dict, run_id: str):
-        self.cfg = cfg
         self.rid = run_id
         self.rd = store.run_dir(run_id)
         self.meta: dict = store.read_json(self.rd / store.META, {}) or {}
+        # Per-run knobs (``hk run --report-interval``) belong to the run, not to the host: a quiet
+        # watcher must not inherit the 30-minute progress report that a build job wants.
+        overrides = {k: v for k, v in (self.meta.get("overrides") or {}).items() if k in cfg}
+        self.cfg = {**cfg, **overrides}
         self.state: dict = store.read_json(self.rd / store.STATE, {}) or {}
         self._child: subprocess.Popen | None = None      # reap the job wrapper we spawned
 
@@ -354,10 +357,13 @@ class Phase:
         """
         if reason in ("milestone", "board"):
             return True
+        interval = float(self.cfg["report_interval_seconds"])
+        if interval <= 0:
+            return False                       # disabled: only real events report
         anchor = self.state.get("last_report_at") or self.state.get("attempt_started")
         if not anchor:
             return False
-        return time.time() - float(anchor) > float(self.cfg["report_interval_seconds"])
+        return time.time() - float(anchor) > interval
 
     def _lease_age(self) -> float:
         lease = store.read_json(self.rd / store.LEASE, {}) or {}

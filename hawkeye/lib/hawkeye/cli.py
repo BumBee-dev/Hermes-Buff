@@ -32,6 +32,8 @@ def _create(cfg: dict, args: argparse.Namespace, kind: str, extra: dict) -> str:
         raise SystemExit("hk: run already exists: %s" % rid)
     meta = {"run_id": rid, "kind": kind, "created_at": time.time(),
             "entry": _entry(), "attempts": cfg["attempts"]}
+    if getattr(args, "report_interval", None) is not None:
+        meta["overrides"] = {"report_interval_seconds": float(args.report_interval)}
     meta.update(extra)
     store.write_json(rd / store.META, meta)
     # The run creator is the agent itself, so the first lease is written right here;
@@ -388,6 +390,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     run = sub.add_parser("run", help="start an exec run (best launched from a terminal background)")
+    run.add_argument("--report-interval", type=float, default=None,
+                     help="seconds between progress reports for THIS run (0 = only real events; "
+                          "a quiet watcher should use 0 so it does not wake the session on a timer)")
     run.add_argument("--id")
     run.add_argument("--cwd")
     run.add_argument("argv", nargs=argparse.REMAINDER)
