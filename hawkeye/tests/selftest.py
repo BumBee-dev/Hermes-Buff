@@ -1246,7 +1246,8 @@ def test_ledger_round_allocator_is_shipped_and_serialised() -> None:
     dup2 = subprocess.run(["bash", str(script), "record", "duplicate", str(body)], env=penv,
                           capture_output=True, text=True, timeout=60)
     check("ledger-round: a pin onto a round the ledger already has is refused",
-          dup.returncode == 0 and dup2.returncode == 2 and "already exists" in (dup2.stderr or ""),
+          dup.returncode == 0 and dup2.returncode == 2
+          and "not above the last written round" in (dup2.stderr or ""),
           "rc=%s %s" % (dup2.returncode, (dup2.stderr or "")[-140:]))
 
     # The scan counts entry *headings*, not every "第 N 轮" in the text: a ledger body routinely quotes
@@ -1329,6 +1330,42 @@ def test_ledger_round_allocator_is_shipped_and_serialised() -> None:
     con.commit(); con.close()
     check("ledger-round: allocation still respects a round the ledger no longer shows",
           ts("next").stdout.strip() == "21", "next=" + ts("next").stdout.strip())
+
+    # The pin guard's floor is max(closed, ledger_max), not ledger_max: on a compaction path the
+    # ledger's own maximum drops while `closed` remembers the highest round written, so guarding on
+    # lmax let a pin re-write an existing round and pulled `closed` backwards.
+    floor_home = BASE / "ledger-pin-floor"
+    floor_home.mkdir()
+    con = sqlite3.connect(str(floor_home / "state.db"))
+    con.execute("create table messages (id integer primary key, session_id text, content text)")
+    for n in range(1, 7):
+        con.execute("insert into messages(session_id, content) values (?, ?)",
+                    ("led", "## 第 %d 轮 · heading" % n))
+    con.commit(); con.close()
+    (floor_home / "round.current").write_text("6\n")
+    (floor_home / "round.closed").write_text("20\n")     # round 20 exists; its message lost the heading
+    floor_stub = floor_home / "stub-hk"
+    floor_stub.write_text("#!/bin/bash\nexit 0\n")
+    floor_stub.chmod(0o755)
+    fenv2 = {**ENV, "IW_STATE_DIR": str(floor_home), "HERMES_HOME": str(floor_home),
+             "IW_LEDGER": "led", "IW_HK": str(floor_stub)}
+
+    def fs(*args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(["bash", str(script), *args], capture_output=True, text=True,
+                              env=fenv2, timeout=60)
+
+    fs("reuse", "15")
+    refused_pin = fs("record", "reused round", str(body))
+    check("ledger-round: a pin is refused against the last written round, not just the visible maximum",
+          refused_pin.returncode == 2 and "not above the last written round (20)" in (refused_pin.stderr or ""),
+          "rc=%s %s" % (refused_pin.returncode, (refused_pin.stderr or "")[-160:]))
+    check("ledger-round: a refused pin does not pull the bookkeeping backwards",
+          (floor_home / "round.closed").read_text().strip() == "20",
+          "closed=" + (floor_home / "round.closed").read_text().strip())
+    still = fs("peek")
+    check("ledger-round: peek reports a writable round, not the unusable pin",
+          still.stdout.strip() == "20" and "will refuse it" in (still.stderr or ""),
+          "peek=%s %s" % (still.stdout.strip(), (still.stderr or "")[-120:]))
 
     # The anchor requires one of the two documented forms: with both prefixes optional, a body
     # paragraph starting at column 0 with "第 12 轮 · …" counted as a heading and inflated the maximum.

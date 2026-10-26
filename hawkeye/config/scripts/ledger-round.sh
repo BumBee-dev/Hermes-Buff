@@ -171,7 +171,22 @@ case "${1:-}" in
     _read_counter
     if [ -f "$PINNED" ]; then
       p=$(tr -d '[:space:]' < "$PINNED" 2>/dev/null)
-      case "$p" in ''|*[!0-9]*) ;; *) CURRENT=$p ;; esac
+      case "$p" in ''|*[!0-9]*) p=0 ;; esac
+      # A pin that `record` would refuse must not be reported as if it were writable: peek answers
+      # "which round is next", and the answer is the pin only when the pin is usable.
+      closed=0
+      [ -f "$CLOSED" ] && closed=$(tr -d '[:space:]' < "$CLOSED" 2>/dev/null)
+      case "$closed" in ''|*[!0-9]*) closed=0 ;; esac
+      _read_ledger_max
+      floor=$closed
+      [ "$LEDGER_MAX" -gt "$floor" ] && floor=$LEDGER_MAX
+      if [ "$p" -gt "$floor" ]; then
+        CURRENT=$p
+      else
+        echo "ledger-round: pin $p is not above the last written round ($floor);"\
+" record will refuse it unless it is re-pinned" >&2
+        [ "$floor" -gt "$CURRENT" ] && CURRENT=$floor
+      fi
     else
       # A consumed pin leaves `closed` ahead of the counter, so peeking the counter alone reported a
       # number rounds behind the ledger (14 in the reported case). Same fact, same three sources.
@@ -218,9 +233,15 @@ case "${1:-}" in
       # An explicit `reuse N` is the caller saying which round this is. Honouring it is the point of
       # the verb -- but it must not resurrect a number the ledger already holds, or the record becomes
       # the duplicate the allocator exists to prevent. Refusing keeps both promises.
-      if [ "$lmax" -ge "$pinned" ]; then
+      # The floor is max(closed, lmax), not lmax: on a compaction path the ledger's own maximum drops
+      # while `closed` still remembers the highest round written, and guarding on lmax alone let a pin
+      # re-write a round that already existed -- and pulled `closed` backwards with it.
+      floor=$lmax
+      [ "$closed" -gt "$floor" ] && floor=$closed
+      if [ "$pinned" -le "$floor" ]; then
         _unlock
-        _die "第 $pinned 轮 already exists in the ledger (highest is $lmax); pin a number above it (the pin is retained -- re-pin to change it)"
+        _die "第 $pinned 轮 is not above the last written round ($floor);"\
+" pin a higher number (the pin is retained -- re-pin to change it)"
       fi
       CURRENT=$pinned
     elif [ "$CURRENT" -eq 0 ] || [ "$closed" -ge "$CURRENT" ] || [ "$lmax" -ge "$CURRENT" ]; then
@@ -244,7 +265,11 @@ case "${1:-}" in
       exit 3
     fi
     _unlock
-    printf '%s\n' "$CURRENT" > "$CLOSED"
+    # "The last round that already has an entry" can only move forward; writing it unconditionally let a
+    # lower pin pull it back and re-open the rewind.
+    if [ "$CURRENT" -gt "$closed" ]; then
+      printf '%s\n' "$CURRENT" > "$CLOSED"
+    fi
     # The counter has to move with the write as well, or the next `peek` reports the pre-pin value.
     printf '%s\n' "$CURRENT" > "$COUNTER"
     rm -f "$PINNED"          # a pin is consumed by the write it described
