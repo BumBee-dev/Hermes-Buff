@@ -1020,6 +1020,44 @@ def test_hk_survives_a_lying_pythonpath_across_the_reexec() -> None:
           proc2.returncode == 0, "rc=%s %s" % (proc2.returncode, out2[-300:]))
 
 
+def test_gate_check_says_when_it_cannot_ask_the_cli() -> None:
+    """`files present + no CLI` is "could not ask", not "missing" — and must not print a fix it cannot run.
+
+    Reported after `c3fd3be`: a cron-style environment (`env -i PATH=/usr/bin:/bin`) makes
+    `shutil.which("hermes")` empty, so every row reads `enabled=unknown` -> `NO` and the remediation
+    printed is `./install.sh --gate --all-profiles`, which needs the same missing CLI. Fail-closed is
+    still the right verdict, so only the diagnosis changes: name the missing CLI, and keep the install
+    hint for the case where the files really are absent.
+    """
+    home = BASE / "gate-nocli"
+    (home / "plugins" / "hermes-hawkeye-gate").mkdir(parents=True)
+    (home / "plugins" / "hermes-hawkeye-gate" / "plugin.yaml").write_text("name: hermes-hawkeye-gate\n")
+
+    env = {**ENV, "HERMES_HOME": str(home), "PATH": "/usr/bin:/bin", "HAWKEYE_HERMES_BIN": ""}
+
+    proc = subprocess.run([sys.executable, str(HK), "gate-check"], capture_output=True, text=True,
+                          env=env, timeout=120)
+    out = (proc.stdout or "") + (proc.stderr or "")
+    check("gate-check: an unaskable CLI still fails closed", proc.returncode == 1,
+          "rc=%s %s" % (proc.returncode, out[-200:]))
+    check("gate-check: it names the missing CLI and the override",
+          "no hermes CLI on PATH" in out and "HAWKEYE_HERMES_BIN" in out, out[-300:])
+    check("gate-check: it does not print a fix that cannot run",
+          "./install.sh --gate" not in out, out[-300:])
+    check("gate-check: it says the verdict is 'could not ask', not 'missing'",
+          "could not ask" in out, out[-300:])
+
+    # Control: with the plugin files genuinely absent, the install hint is the right answer.
+    empty = BASE / "gate-empty"
+    empty.mkdir()
+    env2 = {**env, "HERMES_HOME": str(empty)}
+    proc2 = subprocess.run([sys.executable, str(HK), "gate-check"], capture_output=True, text=True,
+                           env=env2, timeout=120)
+    out2 = (proc2.stdout or "") + (proc2.stderr or "")
+    check("gate-check: a profile with no plugin files still gets the install hint",
+          proc2.returncode == 1 and "./install.sh --gate" in out2, out2[-300:])
+
+
 def test_report_can_append_to_one_ledger_child() -> None:
     """A recurring producer must be able to keep writing into the *same* child session.
 
@@ -1957,6 +1995,7 @@ def main() -> int:
                  test_report_creates_a_child_session,
                  test_interpreter_probe_ignores_a_hostile_pythonpath,
                  test_hk_survives_a_lying_pythonpath_across_the_reexec,
+                 test_gate_check_says_when_it_cannot_ask_the_cli,
                  test_issue_watch_reports_replies_on_closed_issues,
                  test_report_can_append_to_one_ledger_child,
                  test_kernel_branch_resolves_board_paths,

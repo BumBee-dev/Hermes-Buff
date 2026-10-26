@@ -108,9 +108,21 @@ def render(rows: list[dict]) -> str:
     if gap_rows:
         lines.append("")
         lines.append("ungated: %s" % ", ".join(r["profile"] for r in gap_rows))
-        lines.append("fix    : ./install.sh --gate --all-profiles"
-                     "   (or: cp -a plugins/%s <profile-home>/plugins/ +"
-                     " hermes -p <profile> plugins enable %s)" % (PLUGIN, PLUGIN))
+        # A row with the files present and no CLI to ask about is "could not determine", not
+        # "missing". Printing the install hint there sends the reader after the wrong thing -- and
+        # the hint itself cannot run, because it needs the CLI that is already absent.
+        cannot_ask = not _cli()
+        if cannot_ask:
+            lines.append('hk: no hermes CLI on PATH; set HAWKEYE_HERMES_BIN (looked for "hermes")')
+        present = [r for r in gap_rows if r["present"]]
+        if present and cannot_ask:
+            lines.append("note   : plugin files are present on %s; the verdict is"
+                         " \"could not ask\", not \"missing\"" % ", ".join(r["profile"] for r in present))
+        missing_or_askable = [r for r in gap_rows if not r["present"]] or not cannot_ask
+        if missing_or_askable:
+            lines.append("fix    : ./install.sh --gate --all-profiles"
+                         "   (or: cp -a plugins/%s <profile-home>/plugins/ +"
+                         " hermes -p <profile> plugins enable %s)" % (PLUGIN, PLUGIN))
     else:
         lines.append("")
         lines.append("every profile found is gated")
