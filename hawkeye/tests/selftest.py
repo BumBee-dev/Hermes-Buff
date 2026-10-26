@@ -22,6 +22,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -1455,6 +1456,202 @@ def test_ledger_round_allocator_is_shipped_and_serialised() -> None:
           (split.stderr or "")[-200:])
 
 
+LEDGER_HEADING = re.compile(r"^## 第 (\d+) 轮", re.M)
+
+
+def _ledger_record_home(name: str):
+    """A state dir and a recording `hk` stand-in -- nothing that allocates anything.
+
+    The stand-in only concatenates the entry file it is handed into `ledger.md`, so every assertion
+    written against it still describes `ledger-round.sh`: no second implementation of the allocator
+    creeps into the suite, mocked or otherwise. Neither arm below uses a sleep or a widened window;
+    the arms that do are report evidence, not tests (see each docstring).
+    """
+    home = BASE / name
+    state = home / "state"
+    state.mkdir(parents=True)
+    ledger = home / "ledger.md"
+    ledger.write_text("")
+    stub = home / "hk-record"
+    stub.write_text('#!/bin/bash\nfor a in "$@"; do case "$a" in *-record.md) cat "$a" >> "'
+                    + str(ledger) + '";; esac; done\n')
+    stub.chmod(0o755)
+    body = home / "body.md"
+    body.write_text("probe body\n")
+    # No state.db under HERMES_HOME on purpose: the ledger scan has its own test, and leaving it out
+    # keeps these arms about the lock instead of about sqlite.
+    return home, state, ledger, body, {**ENV, "IW_STATE_DIR": str(state), "HERMES_HOME": str(home),
+                                      "IW_LEDGER": "led", "IW_HK": str(stub)}
+
+
+def test_ledger_concurrent_records_hold_the_invariants_an_outside_reader_can_see() -> None:
+    """#19: the state update belongs in the critical section, and a caller that never locks can tell.
+
+    Reported as #19 with a widened arm (a `sleep` inserted between `_unlock` and the two state writes,
+    logic byte-identical): a second record allocated the next round inside that gap, and the first
+    caller then overwrote both files with its older number -- `closed` retreated 8 -> 7 and the
+    counter reproduced the "32 before 31" symptom the header cites. Moving the writes inside the lock
+    is only worth anything if a caller that never takes the lock cannot observe the split, so that is
+    what this asserts: sample `round.closed` and `round.current` without the lock while the records
+    run, and require a monotone, always-parsable value.
+
+    No sleep, no clock, no widening. On the fixed code these invariants hold for every schedule,
+    which is the difference between an invariant and a race reproduction: a race test that fails
+    once in a while teaches people to rerun instead of read.
+    """
+    script = Path(__file__).resolve().parents[1] / "config" / "scripts" / "ledger-round.sh"
+    check("ledger-concurrency: the allocator ships in the tree", script.is_file(), str(script))
+    if not script.is_file():
+        return
+    home, state, ledger, body, env = _ledger_record_home("ledger-concurrency")
+    callers = 8
+    batches = 3
+    total = batches * callers + 1
+
+    seen = {name: {"samples": 0, "last": 0, "bad": ""}
+            for name in ("round.closed", "round.current")}
+    stop = threading.Event()
+
+    def observe() -> None:
+        while not stop.is_set():
+            for name, slot in seen.items():
+                try:
+                    raw = (state / name).read_text()
+                except FileNotFoundError:
+                    continue
+                slot["samples"] += 1
+                text = raw.strip()
+                if not text.isdigit():
+                    slot["bad"] = slot["bad"] or "unparsable %r at sample %d" % (raw, slot["samples"])
+                    continue
+                value = int(text)
+                if value < slot["last"]:
+                    slot["bad"] = slot["bad"] or "retreat %d -> %d at sample %d" % (
+                        slot["last"], value, slot["samples"])
+                slot["last"] = max(slot["last"], value)
+
+    warm = subprocess.run(["bash", str(script), "record", "warm", str(body)], env=env,
+                          capture_output=True, text=True, timeout=60)
+    check("ledger-concurrency: the warm-up record lands", warm.returncode == 0, (warm.stderr or "")[-160:])
+    watcher = threading.Thread(target=observe, daemon=True)
+    watcher.start()
+    broken: list[str] = []
+    try:
+        for batch in range(batches):
+            procs = [subprocess.Popen(["bash", str(script), "record", "%d-%d" % (batch, i), str(body)],
+                                      env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+                     for i in range(callers)]
+            for i, proc in enumerate(procs):
+                _, err = proc.communicate(timeout=180)
+                if proc.returncode != 0:
+                    broken.append("batch %d caller %d rc=%s %s"
+                                  % (batch, i, proc.returncode, (err or "").strip()[-120:]))
+    finally:
+        stop.set()
+        watcher.join(timeout=10)
+
+    headings = [int(n) for n in LEDGER_HEADING.findall(ledger.read_text())]
+    check("ledger-concurrency: every concurrent record succeeds", not broken, "; ".join(broken[:3]))
+    check("ledger-concurrency: %d records write rounds 1..%d once, in order" % (total, total),
+          headings == list(range(1, total + 1)), str(headings))
+    check("ledger-concurrency: no round number is written twice",
+          len(headings) == len(set(headings)) == total, str(sorted(headings)))
+    check("ledger-concurrency: `round.closed` ends on the last written round",
+          (state / "round.closed").read_text().strip() == str(total),
+          "closed=" + (state / "round.closed").read_text().strip())
+    check("ledger-concurrency: the counter ends on the last written round",
+          (state / "round.current").read_text().strip() == str(total),
+          "counter=" + (state / "round.current").read_text().strip())
+    leftovers = sorted(p.name for p in state.glob("*.tmp.*"))
+    check("ledger-concurrency: no temp file survives a state write", leftovers == [], str(leftovers))
+    print("  ledger-concurrency: %d records, %d/%d lock-free samples of closed/counter"
+          % (total, seen["round.closed"]["samples"], seen["round.current"]["samples"]))
+    for name, slot in seen.items():
+        check("ledger-concurrency: a lock-free reader of %s sees no retreat and no tear" % name,
+              slot["bad"] == "" and slot["samples"] > 100,
+              slot["bad"] or "only %d samples -- the observer never ran" % slot["samples"])
+
+
+def test_ledger_lock_free_peek_never_reads_a_half_written_state() -> None:
+    """`peek` takes no lock, so a state write has to be invisible until it is complete.
+
+    Measured both ways on the same script with only `_write_value` swapped (write widened with a
+    0.3 s sleep, one writer, 120 lock-free peeks): truncate-then-write died on `''` 24 times with
+    rc=2, temp-and-rename 0 times -- the tear was reachable, not theoretical. Those arms widen the
+    code under test, which makes them report evidence and a flaky test, so they stay out of the
+    suite; the assertion they established does not. Here the write is left exactly as shipped and
+    only the number of observations is raised: N allocations while a reader samples the counter
+    without the lock, plus the shipped `peek` itself every fourth allocation. Raise
+    HAWKEYE_LEDGER_PROBE_SAMPLES for a stress run.
+    """
+    script = Path(__file__).resolve().parents[1] / "config" / "scripts" / "ledger-round.sh"
+    check("ledger-torn-read: the allocator ships in the tree", script.is_file(), str(script))
+    if not script.is_file():
+        return
+    home, state, _, _, env = _ledger_record_home("ledger-torn-read")
+    samples = int(os.environ.get("HAWKEYE_LEDGER_PROBE_SAMPLES", "60"))
+    counter = state / "round.current"
+    bad: list[str] = []
+    reads = {"n": 0}
+    stop = threading.Event()
+
+    def read_loop() -> None:
+        last = 0
+        while not stop.is_set():
+            try:
+                raw = counter.read_text()
+            except FileNotFoundError:
+                continue
+            reads["n"] += 1
+            text = raw.strip()
+            if not text.isdigit():
+                if len(bad) < 5:
+                    bad.append("torn read %r after %d reads" % (raw, reads["n"]))
+                continue
+            value = int(text)
+            if value < last and len(bad) < 5:
+                bad.append("counter retreated %d -> %d after %d reads" % (last, value, reads["n"]))
+            last = max(last, value)
+
+    reader = threading.Thread(target=read_loop, daemon=True)
+    reader.start()
+    peeks: list[int] = []
+    try:
+        for i in range(samples):
+            allocated = subprocess.run(["bash", str(script), "next"], env=env, capture_output=True,
+                                       text=True, timeout=60)
+            if allocated.returncode != 0 and len(bad) < 5:
+                bad.append("next rc=%s %s" % (allocated.returncode, (allocated.stderr or "").strip()[-120:]))
+            if i % 4:
+                continue
+            # The shipped verb, not a re-implementation of its reads.
+            peeked = subprocess.run(["bash", str(script), "peek"], env=env, capture_output=True,
+                                    text=True, timeout=60)
+            out = (peeked.stdout or "").strip()
+            if peeked.returncode != 0 or not out.isdigit():
+                bad.append("peek rc=%s out=%r err=%s" % (peeked.returncode, out,
+                                                         (peeked.stderr or "").strip()[-120:]))
+                continue
+            peeks.append(int(out))
+    finally:
+        stop.set()
+        reader.join(timeout=10)
+
+    print("  ledger-torn-read: %d lock-free reads, %d peek runs, %d allocations"
+          % (reads["n"], len(peeks), samples))
+    check("ledger-torn-read: no lock-free read saw a partial or retreated counter", bad == [],
+          " | ".join(bad[:3]))
+    check("ledger-torn-read: the observer actually sampled the counter", reads["n"] > 1000,
+          "%d reads across %d allocations" % (reads["n"], samples))
+    check("ledger-torn-read: `peek` never exits non-zero during a write",
+          bool(peeks), "no sample")
+    check("ledger-torn-read: `peek` answers are integers inside the allocated range",
+          all(1 <= n <= samples for n in peeks), str(peeks))
+    check("ledger-torn-read: `peek` never goes backwards", peeks == sorted(peeks), str(peeks))
+    check("ledger-torn-read: the counter ends on the last allocation",
+          counter.read_text().strip() == str(samples), counter.read_text().strip())
+
+
 def test_report_can_append_to_one_ledger_child() -> None:
     """A recurring producer must be able to keep writing into the *same* child session.
 
@@ -2394,6 +2591,8 @@ def main() -> int:
                  test_hk_survives_a_lying_pythonpath_across_the_reexec,
                  test_gate_check_says_when_it_cannot_ask_the_cli,
                  test_ledger_round_allocator_is_shipped_and_serialised,
+                 test_ledger_concurrent_records_hold_the_invariants_an_outside_reader_can_see,
+                 test_ledger_lock_free_peek_never_reads_a_half_written_state,
                  test_issue_watch_reports_replies_on_closed_issues,
                  test_report_can_append_to_one_ledger_child,
                  test_kernel_branch_resolves_board_paths,
