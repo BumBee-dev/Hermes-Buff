@@ -1271,6 +1271,47 @@ def test_ledger_round_allocator_is_shipped_and_serialised() -> None:
           (prose_home / "round.current").read_text().strip() == "9",
           "counter=" + (prose_home / "round.current").read_text().strip())
 
+    # An *abandoned* pin must not steer the next detection: `reuse 20` used to write the counter as
+    # well, so a detect afterwards allocated 21 on a ledger holding 1..6. The pin is now only a pin;
+    # `peek` overlays it so the caller still sees what they asked for.
+    pin2_home = BASE / "ledger-pin-abandoned"
+    pin2_home.mkdir()
+    con = sqlite3.connect(str(pin2_home / "state.db"))
+    con.execute("create table messages (id integer primary key, session_id text, content text)")
+    for n in range(1, 7):
+        con.execute("insert into messages(session_id, content) values (?, ?)",
+                    ("led", "## 第 %d 轮 · heading\n\nbody" % n))
+    con.commit(); con.close()
+    (pin2_home / "round.current").write_text("6\n")
+    (pin2_home / "round.closed").write_text("6\n")
+    penv3 = {**ENV, "IW_STATE_DIR": str(pin2_home), "HERMES_HOME": str(pin2_home), "IW_LEDGER": "led"}
+    subprocess.run(["bash", str(script), "reuse", "20"], env=penv3, capture_output=True, timeout=60)
+    check("ledger-round: peek overlays a pending pin",
+          subprocess.run(["bash", str(script), "peek"], env=penv3, capture_output=True,
+                         text=True, timeout=60).stdout.strip() == "20")
+    subprocess.run(["bash", str(script), "detect", str(raw2)], env=penv3, capture_output=True, timeout=60)
+    check("ledger-round: an abandoned pin does not steer the next detect",
+          (pin2_home / "round.current").read_text().strip() == "7",
+          "counter=" + (pin2_home / "round.current").read_text().strip())
+
+    # The anchor requires one of the two documented forms: with both prefixes optional, a body
+    # paragraph starting at column 0 with "第 12 轮 · …" counted as a heading and inflated the maximum.
+    bare_home = BASE / "ledger-bare-line"
+    bare_home.mkdir()
+    con = sqlite3.connect(str(bare_home / "state.db"))
+    con.execute("create table messages (id integer primary key, session_id text, content text)")
+    for text in ("## 第 1 轮 · a", "## 第 2 轮 · b", "第 12 轮 · a body line at column 0",
+                 "[2026-10-26 20:05:40] 第 9 轮 · stamped heading"):
+        con.execute("insert into messages(session_id, content) values (?, ?)", ("led", text))
+    con.commit(); con.close()
+    (bare_home / "round.current").write_text("9\n")
+    (bare_home / "round.closed").write_text("9\n")
+    benv2 = {**ENV, "IW_STATE_DIR": str(bare_home), "HERMES_HOME": str(bare_home), "IW_LEDGER": "led"}
+    subprocess.run(["bash", str(script), "detect", str(raw2)], env=benv2, capture_output=True, timeout=60)
+    check("ledger-round: a bare body line is not an entry heading",
+          (bare_home / "round.current").read_text().strip() == "10",
+          "counter=" + (bare_home / "round.current").read_text().strip())
+
     # "Cannot read the ledger" must not mean "it is empty": that would write a duplicate round.
     broken_home = BASE / "ledger-broken-home"
     broken_home.mkdir()

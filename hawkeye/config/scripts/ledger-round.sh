@@ -82,7 +82,9 @@ except Exception as exc:
 # 第 19 轮 twice"), and an unanchored scan reads that sentence as the maximum and skips every round
 # in between. Fenced blocks are dropped for the same reason.
 fence = re.compile(r"```.*?```", re.S)
-head = re.compile(r"^\s*(?:#{1,6}\s*)?(?:\[[^\]\n]{0,40}\]\s*)?第\s*(\d+)\s*轮", re.M)
+# One of the two documented forms is *required*: with both prefixes optional a body paragraph that
+# starts at column 0 with "第 12 轮 · …" counted as an entry heading and inflated the maximum.
+head = re.compile(r"^\s*(?:#{1,6}\s*|\[[^\]\n]{0,40}\]\s*)第\s*(\d+)\s*轮", re.M)
 best = 0
 for text in rows:
     if not text:
@@ -121,12 +123,10 @@ _pin() {
   case "$1" in ''|*[!0-9]*) _die "reuse needs a non-negative integer, got \"$1\"" ;; esac
   _lock
   CURRENT=$1
-  printf '%s\n' "$CURRENT" > "$COUNTER"
-  # A pin is the caller stating which round this is, so `record` must honour it: it writes
-  # `round.pinned`, and `round.closed` is set to N-1 so a successful pinned write leaves consistent
-  # bookkeeping (a *second* record then allocates N+1 as usual).
+  # A pin touches nothing else: writing the counter here made an *abandoned* pin steer the next
+  # `detect` (reuse 20, then detect -> 21 on a ledger holding 1..6). `peek` overlays the pin so the
+  # caller still sees it, and `record` consumes it.
   if [ "$CURRENT" -gt 0 ]; then
-    printf '%s\n' "$((CURRENT - 1))" > "$CLOSED"
     printf '%s\n' "$CURRENT" > "$PINNED"
   else
     rm -f "$PINNED"
@@ -161,7 +161,12 @@ _warn_split
 
 case "${1:-}" in
   peek)
-    _read_counter; _say; echo "$CURRENT" ;;
+    _read_counter
+    if [ -f "$PINNED" ]; then
+      p=$(tr -d '[:space:]' < "$PINNED" 2>/dev/null)
+      case "$p" in ''|*[!0-9]*) ;; *) CURRENT=$p ;; esac
+    fi
+    _say; echo "$CURRENT" ;;
   next)
     _alloc; _say; echo "$CURRENT" ;;
   reuse)

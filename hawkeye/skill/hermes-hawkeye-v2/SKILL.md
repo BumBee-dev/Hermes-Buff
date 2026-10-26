@@ -206,7 +206,9 @@ one model, treat the first two as mandatory.
   what changed, how it was verified, the commit, the reply link — lives only in that entry. The
   conversation that owns the wake gets a short summary and a pointer to the round: long reports belong
   in the child session, or the main window becomes the log. The counter lives next to the ledger in
-  the run cache, and the allocator is the shipped script, not the turn's own bookkeeping.
+  the run cache, and the allocator is the shipped script, not the turn's own bookkeeping — keep exactly
+  one copy of it (the shipped one); a template duplicate is the third implementation nobody diffs, and
+  the next host copies the stale one.
 - **A number that guards an append-only store must be derived from the store, not from your own
   counter.** The ledger has more than one writer — a wake turn, a human, another agent — and
   `hk report --into` is the documented way to write into it, so an allocator that trusts only its own
@@ -225,7 +227,15 @@ one model, treat the first two as mandatory.
   `reuse N` is the caller stating which round this is, the next `record` writes N and consumes the pin,
   and a pin onto a number the record already holds refuses (exit 2, message naming the highest round).
   Honouring the pin and never writing a round twice are both promises; the refusal is what keeps them
-  from contradicting, so do not "fix" a refusal by silently allocating N+1.
+  from contradicting, so do not "fix" a refusal by silently allocating N+1. **The scan reads structure,
+  not content**: an entry starts with `[stamp] 第 N 轮 · …` or `## 第 N 轮 · …`, while a body routinely
+  quotes a round number (a commit message, a previous bug: "the old bug wrote 第 19 轮 twice") and may
+  contain a fenced example; an unanchored `第 (\d+) 轮` matched those too and read a ledger with 8 rounds
+  as `max 40`, which sends the next entry to 41 and drops every round in between. Anchor to the line that
+  starts an entry, strip fenced blocks first, and keep a fixture whose body quotes both shapes. And **a
+  scan that cannot answer must not answer 0**: an unreadable store (truncated file, permissions) falling
+  back to "empty" reproduces the duplicate one layer up, so refuse with a non-zero exit and name the
+  session that could not be read.
 - **An appended message is permanent**: the kernel exposes no per-message
   delete, so a numbering test pointed at the live ledger leaves an entry nothing can remove — exercise
   the helper against a fixture session, and if junk does land, append a correction that names the
@@ -548,6 +558,11 @@ existing one. Five rules that cost the loop silently:
   is empty / I cannot see it". Call `touch_session_activity()` after the write and, when asked to prove
   no new window appeared, read `parent_session_id` in `state.db` rather than the sidebar caption (the
   caption is derived from `source`). Recipes in `references/in-session-watch.md`.
+- **A `die` inside `$( … )` kills only the subshell.** A validator called as `x=$(reader)` that exits
+  non-zero leaves the parent running with an empty `x` — the refusal looks implemented, the caller carries
+  on with a blank value, and the bug it was meant to stop arrives one layer down. Have such a helper set a
+  variable and be called directly (`reader; x=$VALUE`), and assert the caller's exit code, not just the
+  helper's message, so a swallowed refusal fails the test.
 - Wake turns advance on their own (measured on the WebUI: no page refresh needed).
 - Use `OnCalendar=*:0/2` rather than `OnBootSec` + `OnUnitActiveSec`: after a manual
   `systemctl --user start` of the service, the latter stops scheduling the next
