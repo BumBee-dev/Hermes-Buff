@@ -1120,8 +1120,19 @@ def test_ledger_round_allocator_is_shipped_and_serialised() -> None:
     check("ledger-round: peek stays stable after reuse",
           run("peek").stdout.strip() == "7" and run("peek").stdout.strip() == "7")
 
-    # Entries need a ledger to append to: without IW_LEDGER the tool must refuse rather than write
-    # somewhere. (The writing path itself is covered by the ledger tests, which have a real session.)
+    # `detect` records the payload on disk and writes nothing to the ledger: an issue-metadata JSON
+    # dump is unreadable to the person the ledger is for, so the ledger gets one human entry per round.
+    raw = BASE / "ledger-round-raw.json"
+    raw.write_text('{"number": 1}\n')
+    detected = subprocess.run(["bash", str(script), "detect", str(raw)], capture_output=True,
+                              text=True, env={**env, "IW_LEDGER": ""}, timeout=60)
+    check("ledger-round: detect succeeds without a ledger (nothing to append)",
+          detected.returncode == 0, detected.stderr[-200:])
+    kept = sorted(work.glob("round-*.raw.json"))
+    check("ledger-round: detect keeps the payload on disk for the agent",
+          bool(kept) and kept[0].read_text().strip() == '{"number": 1}', str(kept))
+
+    # A written entry, on the other hand, needs an address: refusing is better than appending nowhere.
     body = BASE / "ledger-round-body.md"
     body.write_text("x\n")
     refused = subprocess.run(["bash", str(script), "record", "t", str(body)], capture_output=True,

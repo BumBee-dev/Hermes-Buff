@@ -424,6 +424,43 @@ Two rules keep it honest:
 * **the file is append-only for adds** (answers rewrite it atomically), so the history of what was
   asked is never lost and cannot be confused with the todo list's lifetime.
 
+### 7e. Three deployment modes — pick before you wire a task
+
+hawkeye is used *by an agent*, so the first decision is not "which command" but "who has to hear the
+result". Three modes, differing in exactly one property:
+
+| Mode | Detects | Can reply into the conversation that asked | Idle cost | New windows |
+|---|---|---|---|---|
+| **1. cron + hawkeye** (default) | cron, every N minutes | **yes** — via a watcher's exit | 0 tokens, no session | none |
+| **2. cron only** | cron | **no** — delivery has no `webui` adapter | 0 (with a change detector) | one per trigger |
+| **3. hawkeye only** | a file, a process, a board | **yes** | 0 | none |
+
+Two measured facts produce that column: a *wake is a process ending* (the kernel starts a turn in the
+session that started the process), and *cron's delivery targets are platform adapters only* — on WebUI
+`deliver=origin` fails with `unknown platform 'webui'`.
+
+Each mode then has two shapes, and they are not interchangeable:
+
+| | single profile, no board | multi profile with a board |
+|---|---|---|
+| **1** | cron script → ledger child → wake → agent works in the conversation | cron detects board/repo events; gateway dispatcher dispenses; `install.sh --gate --all-profiles`; `hk kanban` supervises; ledger summarises |
+| **2** | one job, one script, one output file (pull → build → verify → report) | cron scans the board and alarms on blocked/crashed/gave-up; the *work* is the dispatcher's, not cron's |
+| **3** | `hk run -- hk watch-file --path X --ttl N` armed from the conversation | `hk kanban` + per-profile gate; the wake says "something moved", the card holds the record |
+
+Pros and cons per cell, plus the failure mode each one invites, are in the agent-facing reference:
+`skill/hermes-hawkeye-v2/references/deployment-modes.md`. The short version:
+
+* **Mode 1** buys "no new windows, detail in a child session, a few lines in the chat" at the cost of
+  needing a live conversation to land the wake in, and of owning the TTL/re-arm loop.
+* **Mode 2** buys "works with nobody there" and cannot answer the conversation at all — the run is a
+  new window and the result is a file or a platform message.
+* **Mode 3** buys an event-precise wake with no scheduler, and costs you a re-arm: a watcher that has
+  exited is a monitor that no longer exists, and `hk run --id` refuses an id that already exists, so
+  every window needs a new id (`issue-wake-1`, `-2`, …) plus `hk lease` on the one that just ended.
+
+Whichever you pick, the same four debts apply: a stated **lifetime**, a stated **return point**, **zero
+idle cost**, and **one record in the reader's language** — conclusions, not payloads.
+
 ## 8a. Two-process pattern: a producer that works, a watcher that wakes
 
 Some work must continue when nobody is in the chat — an issue triage loop, a nightly audit. A run

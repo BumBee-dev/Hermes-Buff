@@ -145,6 +145,20 @@ one model, treat the first two as mandatory.
 
 ## Judgement and correction (dispatch scenarios)
 
+- **Pick a deployment mode before writing anything.** Three exist and they differ in one thing that
+  decides the rest — whether the result can come back to the conversation that asked:
+
+  | Mode | Detects | Wakes the conversation | Use when |
+  |---|---|---|---|
+  | cron + hawkeye (default) | cron | yes, via a watcher's exit | a person may be there and wants the answer in the chat |
+  | cron only | cron | no (delivery has no `webui` adapter) | nobody is there, or the result belongs on disk/Telegram |
+  | hawkeye only | a file/process/board event | yes | the trigger is an event, not a schedule |
+
+  Each mode has a single-profile/no-board and a multi-profile/board shape, with its own pros and
+  failure modes: `references/deployment-modes.md`. Read it before wiring a task — choosing by feel is
+  how a monitor ends up invisible, or a cron job ends up looking like it replied when it only wrote a
+  file.
+
 - **Nothing I start may be invisible and immortal.** The user's only view is the chat window, so
   every background thing (a run, a watcher, a timer) needs two properties stated out loud when it
   is armed: **how long it lives** (a TTL) and **when it comes back to the chat**. A process that

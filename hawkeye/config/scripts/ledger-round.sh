@@ -89,19 +89,16 @@ case "$cmd" in
     _pin "$2"; echo ;;
   detect)
     [ $# -eq 2 ] || usage
-    [ -n "${IW_LEDGER:-}" ] || { echo "ledger-round: IW_LEDGER is not set; refusing to write an unaddressed entry" >&2; exit 2; }
     raw=$2
     [ -f "$raw" ] || { echo "ledger-round: no such file: $raw" >&2; exit 2; }
     n=$(_alloc)
-    entry="$STATE_DIR/round-$n-detect.md"
-    {
-      printf '## 第 %d 轮 · 检测到新活动\n\n' "$n"
-      printf '检测时间：%s%s\n\n' "$(date -u +%FT%TZ)" "${IW_REPO:+（仓库 $IW_REPO）}"
-      cat "$raw"
-      printf '\n说明：本条只记录"看到了什么"。修了什么、验证结果、提交与回帖，见同编号的修复记录。\n'
-    } > "$entry"
-    _report "$entry" "第 $n 轮 · 检测到新活动"
-    rm -f "$entry"
+    # The payload is for the agent, not for the ledger: a JSON dump of issue metadata is unreadable to
+    # the person the ledger exists for, and the ledger stops being worth opening. So the raw stays on
+    # disk (where the wake turn reads it) and the ledger receives exactly one human-readable entry per
+    # round, written by `record` after the work is done.
+    kept="$STATE_DIR/round-$n.raw.json"
+    cp "$raw" "$kept"
+    printf '第 %d 轮：原文已存 %s（账本不写原文，只写结论）\n' "$n" "$kept"
     ;;
   record)
     [ $# -eq 3 ] || usage
