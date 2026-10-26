@@ -23,6 +23,10 @@ stall_seconds = 900.0
 # than this, so the run cache does not grow for the life of the host. Runs with an incident are
 # kept -- they are the evidence someone comes back for. 0 disables the sweep.
 retention_days = 7.0
+# A finished run whose report has not been acknowledged yet is kept for this long, because the
+# wake is queued and delivered after the run ends: sweeping the directory first makes the
+# notification point at nothing.
+delivery_grace_seconds = 300.0
 
 poll_seconds = 2.0              # polling interval of the supervisor phase
 

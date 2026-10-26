@@ -95,6 +95,19 @@ def file_lock(path: Path):
         os.close(fd)
 
 
+def report_consumed(state: dict, lease: dict) -> bool:
+    """True when a lease renewal happened at or after the last report.
+
+    "Consumed" is relative to the report, not to the clock: a notifier reports, wakes the session,
+    gets its lease and is done. Comparing the lease age to *now* therefore flags every healthy
+    notifier one grace window later, which is #10. A run with no report has nothing to consume and
+    is not "unconsumed" -- callers check ``reports > 0`` themselves.
+    """
+    last_report = float(state.get("last_report_at") or 0)
+    seen = float((lease or {}).get("agent_seen") or 0)
+    return bool(last_report) and seen >= last_report
+
+
 def prunable_runs(root: Path, days: float, *, keep_incidents: bool = True) -> list[Path]:
     """Finished runs older than *days* that may be deleted.
 

@@ -98,6 +98,19 @@ def cmd_lease(args: argparse.Namespace, cfg: dict) -> int:
     return 0
 
 
+def _legacy_runs() -> list[Path]:
+    """Run directories still in the pre-cache layout (``<home>/hawkeye-v2/runs``).
+
+    The layout change moved the root; a phase that was already running keeps writing to the old
+    one, and a tool that only reads the new root makes exactly that run invisible -- the one that
+    needs supervision most (#9).
+    """
+    root = store.hermes_home() / "hawkeye-v2" / "runs"
+    if not root.is_dir():
+        return []
+    return sorted(p for p in root.iterdir() if p.is_dir() and (p / store.META).is_file())
+
+
 def cmd_status(args: argparse.Namespace, cfg: dict) -> int:
     targets = _targets(args)
     rows = []
@@ -108,6 +121,9 @@ def cmd_status(args: argparse.Namespace, cfg: dict) -> int:
         return 0
     if not rows:
         print("(no runs)")
+        for legacy in _legacy_runs():
+            print("note: %s lives in the legacy run root %s; it is not supervised from here"
+                  % (legacy.name, store.hermes_home() / "hawkeye-v2" / "runs"))
         return 0
     print("%-24s %-8s %-10s %5s %4s %6s %6s  %s" %
           ("RUN", "KIND", "STATUS", "TRIES", "RPTS", "SUP_AGE", "LSE_AGE", "NOTE"))
@@ -117,6 +133,9 @@ def cmd_status(args: argparse.Namespace, cfg: dict) -> int:
             "-" if row["sup_age_s"] is None else "%ds" % row["sup_age_s"],
             "-" if row["lease_age_s"] is None else "%ds" % row["lease_age_s"],
             row["note"]))
+    for legacy in _legacy_runs():
+        print("note: %s lives in the legacy run root %s; it is not supervised from here"
+              % (legacy.name, store.hermes_home() / "hawkeye-v2" / "runs"))
     return 0
 
 
@@ -353,6 +372,16 @@ def cmd_gc(args: argparse.Namespace, cfg: dict) -> int:
         if not state.get("finished"):
             kept.append((rd.name, "not finished"))
             continue
+        # A finished run whose wake has not been delivered yet must survive any sweep: the report
+        # exists on disk, the notification is still queued, and deleting the directory makes the
+        # wake point at nothing (measured: --days 0 --force removed a run 11s after it reported).
+        grace = float(cfg.get("delivery_grace_seconds", 300) or 0)
+        if grace > 0 and int(state.get("reports") or 0) > 0:
+            lease = store.read_json(rd / store.LEASE, {}) or {}
+            age_since_finish = now - float(state.get("finished_at") or 0)
+            if not store.report_consumed(state, lease) and age_since_finish < grace:
+                kept.append((rd.name, "report not delivered yet"))
+                continue
         finished_at = float(state.get("finished_at") or 0)
         if finished_at and (now - finished_at) < args.days * 86400:
             kept.append((rd.name, "younger than %.0f days" % args.days))

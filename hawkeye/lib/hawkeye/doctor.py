@@ -161,9 +161,12 @@ def scan(cfg: dict, fix: bool = False) -> list[dict[str, Any]]:
                 action = "cannot restart (meta.entry missing)"
 
         incident = bool(store.read_json(rd / store.INCIDENT, {}))
-        # A finished run whose report nobody consumed is the dangerous case, not
-        # an exception: the work is done and the one person who should know is gone.
+        # A report nobody acknowledged is the dangerous case -- but "acknowledged" is relative to
+        # the report, not to the clock. A notifier reports, wakes the session, takes its lease and
+        # ends; comparing the lease age to *now* flagged every one of those healthy runs one grace
+        # window later (#10). Only a report with no lease after it may raise.
         if (int(state.get("reports") or 0) > 0
+                and not store.report_consumed(state, lease)
                 and lease_age > float(cfg["wake_grace_seconds"])):
             if _open_incident(cfg, rd, state, lease_age):
                 incident = True

@@ -36,7 +36,10 @@ set -euo pipefail
 
 REPO_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 UNIT_SRC="$REPO_DIR/config/systemd"
-UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+DEFAULT_UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+UNIT_DIR="$DEFAULT_UNIT_DIR"
+UNIT_DIR_GIVEN=0
+REDIRECTED=0
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
 HAWKEYE_V2_CONFIG="${HAWKEYE_V2_CONFIG:-}"
 HAWKEYE_KERNEL_SRC="${HAWKEYE_KERNEL_SRC:-}"
@@ -88,12 +91,12 @@ usage() {
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --hermes-home)  HERMES_HOME="$2"; shift 2 ;;
-        --config)       HAWKEYE_V2_CONFIG="$2"; shift 2 ;;
+        --hermes-home)  HERMES_HOME="$2"; REDIRECTED=1; shift 2 ;;
+        --config)       HAWKEYE_V2_CONFIG="$2"; REDIRECTED=1; shift 2 ;;
         --kernel-src)   HAWKEYE_KERNEL_SRC="$2"; shift 2 ;;
         --python)       HAWKEYE_PYTHON="$2"; shift 2 ;;
-        --unit-dir)     UNIT_DIR="$2"; shift 2 ;;
-        --skill-dir)    SKILL_DEST="$2"; shift 2 ;;
+        --unit-dir)     UNIT_DIR="$2"; UNIT_DIR_GIVEN=1; shift 2 ;;
+        --skill-dir)    SKILL_DEST="$2"; REDIRECTED=1; shift 2 ;;
         --gate)         DO_GATE=1; shift ;;
         --profiles)     GATE_PROFILES="$2"; DO_GATE=1; shift 2 ;;
         --all-profiles) GATE_PROFILES=""; DO_GATE=1; shift ;;
@@ -114,6 +117,16 @@ sys.exit(0 if sys.version_info >= (3, 11) else 1)
 PY
 
 HERMES_HOME="${HERMES_HOME/#\~/$HOME}"
+
+# A redirected install must never rewrite the units of the host it is testing on: they name
+# HERMES_HOME and the hk path, so pointing them at a fixture silently disables the doctor on the
+# real machine (measured: 65 minutes of 203/EXEC while the timer kept firing). Derive a unit dir
+# under the redirect instead of refusing, and say so; --unit-dir still wins.
+if [ "$UNIT_DIR_GIVEN" = "0" ] && [ "$REDIRECTED" = "1" ]; then
+    REDIRECTED=1
+    UNIT_DIR="$HERMES_HOME/systemd/user"
+    note "redirected install: units go to $UNIT_DIR (pass --unit-dir to choose)"
+fi
 # Derive the config default only now: --hermes-home may have just moved HERMES_HOME,
 # and resolving it up top silently kept an inherited value instead (measured: with
 # HERMES_HOME exported in the environment, --hermes-home /tmp/x still wrote to the
@@ -129,6 +142,34 @@ if [ ! -f "$HAWKEYE_V2_CONFIG" ] && [ -f "$LEGACY_CONFIG" ]; then
     mv "$LEGACY_CONFIG" "$HAWKEYE_V2_CONFIG"
     note "migrated config out of HERMES_HOME: $LEGACY_CONFIG -> $HAWKEYE_V2_CONFIG"
     rmdir "$HERMES_HOME/hawkeye-v2" 2>/dev/null || true
+fi
+
+# Run directories move too, but never out from under a live phase: a finished run is a record, an
+# unfinished one is a process. Moving the second is how you orphan a job (#8) and leaving both is
+# how the layout change made in-flight runs invisible to status and doctor (#9).
+LEGACY_RUNS="$HERMES_HOME/hawkeye-v2/runs"
+NEW_RUNS="$HERMES_HOME/cache/hawkeye/runs"
+if [ -d "$LEGACY_RUNS" ]; then
+    mkdir -p "$NEW_RUNS"
+    moved=0
+    left=0
+    left_names=""
+    for rd in "$LEGACY_RUNS"/*; do
+        [ -d "$rd" ] || continue
+        if grep -q '"finished": *true' "$rd/state.json" 2>/dev/null; then
+            [ -e "$NEW_RUNS/$(basename "$rd")" ] && continue
+            mv "$rd" "$NEW_RUNS/" && moved=$((moved + 1))
+        else
+            left=$((left + 1))
+            left_names="$left_names $(basename "$rd")"
+        fi
+    done
+    [ "$moved" -gt 0 ] && note "migrated $moved finished run(s) to $NEW_RUNS"
+    if [ "$left" -gt 0 ]; then
+        note "left $left live run(s) in $LEGACY_RUNS:$left_names"
+        note "  they keep running there; hk status names them, and doctor will not restart them"
+    fi
+    rmdir "$LEGACY_RUNS" "$HERMES_HOME/hawkeye-v2" 2>/dev/null || true
 fi
 SKILL_DEST="${SKILL_DEST:-$HERMES_HOME/skills/software-development/hermes-hawkeye-v2}"
 

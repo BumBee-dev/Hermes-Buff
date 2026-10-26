@@ -1056,6 +1056,119 @@ def test_stop_leaves_a_finished_run_alone() -> None:
           "already finished" in proc.stdout, proc.stdout.strip())
 
 
+def test_redirected_install_keeps_the_host_units_and_migrates_runs() -> None:
+    """Two silent ways an install/upgrade turns the doctor off (#9).
+
+    (1) `UNIT_DIR` used to ignore `--hermes-home`/`--config`, so a verification install rewrote the
+    *production* unit to point at a fixture -- the timer then fired 203/EXEC every two minutes for
+    an hour with nothing noticing. (2) The layout migration moved the config but not
+    `<home>/hawkeye-v2/runs`, so a phase that was already running became invisible to `status`
+    and `doctor` -- the one run that needs supervision.
+
+    Both are asserted in one install: the host unit dir stays untouched, and a finished legacy run
+    moves while a live one is left where it is and named in the output.
+    """
+    try:
+        managed = subprocess.run(["systemctl", "--user", "show-environment"],
+                                 capture_output=True, timeout=20).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        managed = False
+    if not managed:
+        print("  SKIP install-migrate: no user systemd manager for the daemon-reload step")
+        return
+
+    home = BASE / "mig-home"
+    xdg = BASE / "mig-xdg"
+    legacy = home / "hawkeye-v2" / "runs"
+    done = legacy / "old-done"
+    live = legacy / "old-live"
+    done.mkdir(parents=True)
+    live.mkdir(parents=True)
+    (done / "meta.json").write_text(json.dumps({"kind": "exec", "entry": "/bin/true"}))
+    (done / "state.json").write_text(json.dumps({"finished": True, "finished_at": time.time()}))
+    (live / "meta.json").write_text(json.dumps({"kind": "exec", "entry": "/bin/true"}))
+    (live / "state.json").write_text(json.dumps({"finished": False}))
+
+    installer = Path(__file__).resolve().parents[1] / "install.sh"
+    proc = subprocess.run(["bash", str(installer), "--no-enable", "--skip-skill",
+                           "--hermes-home", str(home), "--config", str(home / "hawkeye.toml")],
+                          capture_output=True, text=True, timeout=120,
+                          env={**ENV, "HERMES_HOME": str(home), "XDG_CONFIG_HOME": str(xdg)})
+    out = proc.stdout + proc.stderr
+    check("install: a redirected install succeeds", proc.returncode == 0, out.strip()[-300:])
+    check("install: the host unit dir is untouched",
+          not (xdg / "systemd" / "user" / "hawkeye-doctor.service").exists(),
+          str(xdg / "systemd" / "user"))
+    check("install: units land under the redirected home",
+          (home / "systemd" / "user" / "hawkeye-doctor.service").is_file())
+    check("install: a finished legacy run is migrated",
+          (home / "cache" / "hawkeye" / "runs" / "old-done" / "meta.json").is_file())
+    check("install: a live legacy run is left in place", live.is_dir())
+    check("install: the output names the live run it left", "old-live" in out, out[-300:])
+
+
+def test_doctor_does_not_flag_a_consumed_report() -> None:
+    """A notifier's normal lifecycle must not look like an abandoned report (#10).
+
+    The check was "a report exists and the lease is old", which flags every healthy notifier one
+    grace window after it ends: report at T, agent leases at T+3s, and 15 minutes later the lease
+    *is* old. "Consumed" has to mean the lease is at or after the report, not that it is recent.
+    """
+    conf = cfg("consumed", wake_grace_seconds=0.3)
+    now = time.time()
+    rd = RUNS / "consumed-1"
+    rd.mkdir(parents=True, exist_ok=True)
+    (rd / "meta.json").write_text(json.dumps({"kind": "exec"}))
+    (rd / "state.json").write_text(json.dumps({
+        "finished": True, "finished_at": now - 900, "reports": 1,
+        "wakes": 1, "last_report_at": now - 905, "last_reason": "done"}))
+    (rd / "lease.json").write_text(json.dumps({"agent_seen": now - 902, "by": "agent"}))
+    result = hk(["doctor", "--fix", "--json"], conf, check=False)
+    row = next((r for r in json.loads(result.stdout or "[]") if r["run"] == "consumed-1"), {})
+    check("consumed: a report with a later lease raises no incident", row.get("incident") is False,
+          str(row))
+    check("consumed: no incident file is written", not (rd / "incident.json").is_file())
+
+    missed = RUNS / "missed-1"
+    missed.mkdir(parents=True, exist_ok=True)
+    (missed / "meta.json").write_text(json.dumps({"kind": "exec"}))
+    (missed / "state.json").write_text(json.dumps({
+        "finished": True, "finished_at": now - 900, "reports": 1,
+        "wakes": 1, "last_report_at": now - 905, "last_reason": "done"}))
+    (missed / "lease.json").write_text(json.dumps({"agent_seen": now - 4000, "by": "agent"}))
+    result = hk(["doctor", "--fix", "--json"], conf, check=False)
+    row = next((r for r in json.loads(result.stdout or "[]") if r["run"] == "missed-1"), {})
+    check("consumed: a report nobody leased after still raises an incident",
+          row.get("incident") is True, str(row))
+
+
+def test_gc_waits_for_a_report_to_be_delivered() -> None:
+    """The wake is queued and arrives after the run ends, so the sweep must not win that race.
+
+    Measured in the field: a notifier reported, `hk gc --days 0 --force` removed the directory
+    eleven seconds later, and the notification then pointed at nothing.
+    """
+    conf = cfg("deliver", delivery_grace_seconds=300)
+    now = time.time()
+    fresh = RUNS / "deliver-fresh"
+    fresh.mkdir(parents=True, exist_ok=True)
+    (fresh / "meta.json").write_text(json.dumps({"kind": "exec"}))
+    (fresh / "state.json").write_text(json.dumps({
+        "finished": True, "finished_at": now - 11, "reports": 1, "last_report_at": now - 11}))
+    (fresh / "lease.json").write_text(json.dumps({"agent_seen": 0}))
+    hk(["gc", "--days", "0", "--force"], conf)
+    check("deliver: a report that has not been acknowledged is not swept", fresh.is_dir())
+
+    old = RUNS / "deliver-old"
+    old.mkdir(parents=True, exist_ok=True)
+    (old / "meta.json").write_text(json.dumps({"kind": "exec"}))
+    (old / "state.json").write_text(json.dumps({
+        "finished": True, "finished_at": now - 4000, "reports": 1, "last_report_at": now - 4000}))
+    (old / "lease.json").write_text(json.dumps({"agent_seen": 0}))
+    hk(["gc", "--days", "0", "--force"], conf)
+    check("deliver: once the window has passed, the sweep proceeds", not old.is_dir())
+
+
 def test_installer_installs_every_reference() -> None:
     """A self-consistent tree is not an installed artifact that is complete (#6).
 
@@ -1108,6 +1221,9 @@ def main() -> int:
                  test_milestone_and_wake_discipline, test_phase_exits_when_the_run_disappears,
                  test_stop_kills_the_job_command, test_stop_stops_the_phase,
                  test_stop_leaves_a_finished_run_alone,
+                 test_redirected_install_keeps_the_host_units_and_migrates_runs,
+                 test_doctor_does_not_flag_a_consumed_report,
+                 test_gc_waits_for_a_report_to_be_delivered,
                  test_installer_installs_every_reference,
                  test_kanban_watcher_reads_default_board,
                  test_named_board_is_not_the_default_board,
