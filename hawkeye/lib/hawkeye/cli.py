@@ -363,33 +363,22 @@ def cmd_gc(args: argparse.Namespace, cfg: dict) -> int:
         print("(no runs)")
         return 0
     now = time.time()
+    # The wake is queued and arrives after the run ends, so a report that has not been
+    # acknowledged yet must survive *any* sweep (measured: --days 0 --force removed a run 11s
+    # after it reported). The grace lives in the shared verdict, not in this loop, because the
+    # doctor sweep reads the same question and used to answer it differently (#10 follow-on).
+    grace = float(cfg.get("delivery_grace_seconds", 300) or 0)
     removable: list[Path] = []
     kept: list[tuple[str, str]] = []
     for rd in sorted(root.iterdir()):
         if not rd.is_dir() or not (rd / store.META).is_file():
             continue
-        state = store.read_json(rd / store.STATE, {}) or {}
-        if not state.get("finished"):
-            kept.append((rd.name, "not finished"))
-            continue
-        # A finished run whose wake has not been delivered yet must survive any sweep: the report
-        # exists on disk, the notification is still queued, and deleting the directory makes the
-        # wake point at nothing (measured: --days 0 --force removed a run 11s after it reported).
-        grace = float(cfg.get("delivery_grace_seconds", 300) or 0)
-        if grace > 0 and int(state.get("reports") or 0) > 0:
-            lease = store.read_json(rd / store.LEASE, {}) or {}
-            age_since_finish = now - float(state.get("finished_at") or 0)
-            if not store.report_consumed(state, lease) and age_since_finish < grace:
-                kept.append((rd.name, "report not delivered yet"))
-                continue
-        finished_at = float(state.get("finished_at") or 0)
-        if finished_at and (now - finished_at) < args.days * 86400:
-            kept.append((rd.name, "younger than %.0f days" % args.days))
-            continue
-        if (rd / store.INCIDENT).is_file() and not args.force:
-            kept.append((rd.name, "has incident"))
-            continue
-        removable.append(rd)
+        why = store.prune_verdict(rd, args.days, grace_seconds=grace,
+                                  keep_incidents=not args.force, now=now)
+        if why is None:
+            removable.append(rd)
+        else:
+            kept.append((rd.name, why))
     for rd in removable:
         if not args.dry_run:
             shutil.rmtree(rd, ignore_errors=True)

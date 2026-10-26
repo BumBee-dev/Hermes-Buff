@@ -108,31 +108,55 @@ def report_consumed(state: dict, lease: dict) -> bool:
     return bool(last_report) and seen >= last_report
 
 
-def prunable_runs(root: Path, days: float, *, keep_incidents: bool = True) -> list[Path]:
-    """Finished runs older than *days* that may be deleted.
+def prune_verdict(rd: Path, days: float, *, grace_seconds: float = 0.0,
+                  keep_incidents: bool = True, now: float | None = None) -> str | None:
+    """Why run directory *rd* must stay, or ``None`` when it may be deleted.
 
-    One predicate for both ``hk gc`` and the doctor sweep: "may this directory go" must have
-    exactly one answer, or the two callers drift and a run survives one of them and not the
-    other. An unfinished run is never returned -- its phase may still be alive and would keep
-    writing into a directory that no longer exists.
+    One answer to "may this directory go", so ``hk gc`` and the doctor sweep cannot disagree.
+    A grace window applied by only one of them is not a grace window: the sweep runs unattended
+    every two minutes and deleted a finished run whose wake was still queued, which is the loss
+    ``hk gc`` had just been taught to avoid (#10 follow-on).
+
+    Every reason it can return is a reason *not* to delete: an unfinished run's phase may still
+    be alive and would keep writing into a directory that no longer exists, a report nobody has
+    leased yet is still a wake on its way, and an incident is evidence.
+
+    ``days`` is "finished at least this long ago"; a non-positive value means no age gate at all,
+    which is what ``hk gc --days 0 --force`` asks for. ``prunable_runs`` keeps the *other*
+    reading of zero ("retention disabled") because the doctor's sweep must be switchable off.
+    """
+    if not rd.is_dir() or not (rd / META).is_file():
+        return "not a run"
+    state = read_json(rd / STATE, {}) or {}
+    if not state.get("finished"):
+        return "not finished"
+    now = time.time() if now is None else now
+    finished_at = float(state.get("finished_at") or 0)
+    if days > 0 and finished_at and (now - finished_at) < days * 86400:
+        return "younger than %g days" % days
+    if grace_seconds > 0 and int(state.get("reports") or 0) > 0:
+        lease = read_json(rd / LEASE, {}) or {}
+        if not report_consumed(state, lease) and (now - finished_at) < grace_seconds:
+            return "report not delivered yet"
+    if keep_incidents and (rd / INCIDENT).is_file():
+        return "has incident"
+    return None
+
+
+def prunable_runs(root: Path, days: float, *, keep_incidents: bool = True,
+                  grace_seconds: float = 0.0) -> list[Path]:
+    """Finished runs older than *days* that may be deleted (see ``prune_verdict``).
+
+    ``days <= 0`` disables retention here rather than meaning "no age gate": the doctor's sweep
+    must be switchable off, and a sweep that deleted every finished run the moment the setting
+    was zeroed would be the worst possible reading of "off".
     """
     if days <= 0 or not root.is_dir():
         return []
     now = time.time()
-    out: list[Path] = []
-    for rd in sorted(root.iterdir()):
-        if not rd.is_dir() or not (rd / META).is_file():
-            continue
-        state = read_json(rd / STATE, {}) or {}
-        if not state.get("finished"):
-            continue
-        finished_at = float(state.get("finished_at") or 0)
-        if finished_at and (now - finished_at) < days * 86400:
-            continue
-        if keep_incidents and (rd / INCIDENT).is_file():
-            continue
-        out.append(rd)
-    return out
+    return [rd for rd in sorted(root.iterdir())
+            if prune_verdict(rd, days, grace_seconds=grace_seconds,
+                             keep_incidents=keep_incidents, now=now) is None]
 
 
 def new_run_id(kind: str) -> str:

@@ -74,8 +74,10 @@ def cfg(name: str, **over):
     return path
 
 
-def hk(args, conf, timeout=90, check=True):
+def hk(args, conf, timeout=90, check=True, root=None):
     env = {**ENV, "HAWKEYE_V2_CONFIG": str(conf)}
+    if root is not None:
+        env["HAWKEYE_V2_ROOT"] = str(root)
     proc = subprocess.run([sys.executable, str(HK)] + list(args),
                           capture_output=True, text=True, timeout=timeout, env=env)
     if check and proc.returncode != 0:
@@ -210,10 +212,12 @@ def test_hang_kill_reaches_the_job_command() -> None:
     reparented to init, with job.pid already deleted -- a report about a job that is still alive
     and no way left on disk to find it.
     """
+    # The marker is unique per suite instance: the leftover scan reads /proc, so two suites on one
+    # host sharing "sleep 9773" make each other's live job look like an orphan and fail at random.
     cases = [("timeout", cfg("timeoutkill", attempts=1, attempt_timeout_seconds=2,
-                             poll_seconds=0.2, stall_seconds=0), "sleep 9773"),
+                             poll_seconds=0.2, stall_seconds=0), "sleep 9773.%d" % os.getpid()),
              ("stalled", cfg("stallkill", attempts=1, attempt_timeout_seconds=60,
-                             poll_seconds=0.2, stall_seconds=0.8), "sleep 9774")]
+                             poll_seconds=0.2, stall_seconds=0.8), "sleep 9774.%d" % os.getpid())]
     for why, conf, marker in cases:
         rid = "hangkill-%s" % why
         started = time.time()
@@ -1185,6 +1189,93 @@ def test_gc_waits_for_a_report_to_be_delivered() -> None:
     check("deliver: once the window has passed, the sweep proceeds", not old.is_dir())
 
 
+def test_the_sweep_shares_the_gc_predicate() -> None:
+    """A grace window only one caller applies is not a grace window (#10, follow-on).
+
+    ``store.prunable_runs`` is documented as one answer to "may this directory go", and
+    ``doctor --fix`` prunes through it -- but the delivery grace was added inside ``cmd_gc``, so
+    the two callers disagreed. With ``retention_days`` at its 7-day default the disagreement
+    cannot bite, which is why this is latent rather than live; the sweep is still the path that
+    runs every two minutes on a host nobody is watching, and it deleted the one run whose report
+    was still queued.
+    """
+    shared = BASE / "predicate-runs"
+    shared.mkdir(parents=True, exist_ok=True)
+    conf = cfg("predicate", retention_days=0.0007, delivery_grace_seconds=300)
+    now = time.time()
+
+    def undelivered() -> Path:
+        rd = shared / "undelivered"
+        rd.mkdir(parents=True, exist_ok=True)
+        (rd / "meta.json").write_text(json.dumps({"kind": "exec"}))
+        (rd / "state.json").write_text(json.dumps({
+            "finished": True, "finished_at": now - 120, "reports": 1,
+            "last_report_at": now - 120}))
+        (rd / "lease.json").write_text(json.dumps({"agent_seen": 0}))
+        return rd
+
+    rd = undelivered()
+    gc_out = hk(["gc", "--days", "0.0007", "--force"], conf, root=shared)
+    check("predicate: gc keeps a report that was never delivered", rd.is_dir(), gc_out.stdout)
+    check("predicate: gc names the reason", "not delivered" in gc_out.stdout, gc_out.stdout)
+
+    doctor_out = hk(["doctor", "--fix"], conf, root=shared, check=False).stdout
+    check("predicate: the doctor sweep keeps the same directory", rd.is_dir(),
+          "the sweep deleted what gc had just refused to delete: %r" % doctor_out.strip())
+    check("predicate: the sweep does not report a zero-day prune",
+          "older than 0 days" not in doctor_out, doctor_out.strip())
+
+    # A grace that never expires is not a grace: a run that finished long ago and whose report
+    # *was* leased must still be swept, or "delivery grace" has quietly become "never delete".
+    late = shared / "delivered"
+    late.mkdir(parents=True, exist_ok=True)
+    (late / "meta.json").write_text(json.dumps({"kind": "exec"}))
+    (late / "state.json").write_text(json.dumps({
+        "finished": True, "finished_at": now - 4000, "reports": 1,
+        "last_report_at": now - 4000}))
+    (late / "lease.json").write_text(json.dumps({"agent_seen": now - 3990}))
+    hk(["doctor", "--fix"], conf, root=shared, check=False)
+    check("predicate: past the window the sweep still proceeds", not late.is_dir(),
+          "the grace turned the sweep off instead of delaying it")
+    check("predicate: the kept run is still there to be audited", rd.is_dir())
+
+
+def test_a_spelled_out_default_path_is_not_a_redirect() -> None:
+    """`--config` at the *default* path must not move the host's units (#9, follow-on).
+
+    "Any path-moving flag marks the install as redirected" reads a documented one-liner that
+    names the real config -- it lives outside HERMES_HOME on this host, so the flag is always
+    passed -- as a fixture install, and derives the unit dir under HERMES_HOME. The doctor then
+    stops being started and nothing says why: the same failure mode as #9, one flag further in.
+    A flag may only redirect the install when its value really differs from the default it
+    replaces.
+    """
+    installer = Path(__file__).resolve().parents[1] / "install.sh"
+    home = BASE / "spelled-home"
+    xdg = BASE / "spelled-xdg"
+    default_conf = xdg / "hawkeye" / "hawkeye.toml"
+    env = {**ENV, "HERMES_HOME": str(home), "XDG_CONFIG_HOME": str(xdg)}
+
+    spelled = subprocess.run(["bash", str(installer), "--print-only", "--no-enable",
+                              "--skip-skill", "--config", str(default_conf)],
+                             capture_output=True, text=True, timeout=120, env=env)
+    out = spelled.stdout + spelled.stderr
+    check("spelled: the spelled-out default install succeeds", spelled.returncode == 0,
+          out.strip()[-300:])
+    check("spelled: units stay in the default unit dir",
+          "units     : %s/systemd/user" % xdg in out, out.strip()[-400:])
+    check("spelled: nothing claims to be redirected", "redirected install" not in out,
+          out.strip()[-400:])
+
+    moved = subprocess.run(["bash", str(installer), "--print-only", "--no-enable",
+                            "--skip-skill", "--config", str(BASE / "other" / "hawkeye.toml")],
+                           capture_output=True, text=True, timeout=120, env=env)
+    out = moved.stdout + moved.stderr
+    check("spelled: a config outside the default still redirects the units",
+          "units     : %s/systemd/user" % home in out and "redirected install" in out,
+          out.strip()[-400:])
+
+
 def test_installer_installs_every_reference() -> None:
     """A self-consistent tree is not an installed artifact that is complete (#6).
 
@@ -1240,6 +1331,8 @@ def main() -> int:
                  test_redirected_install_keeps_the_host_units_and_migrates_runs,
                  test_doctor_does_not_flag_a_consumed_report,
                  test_gc_waits_for_a_report_to_be_delivered,
+                 test_the_sweep_shares_the_gc_predicate,
+                 test_a_spelled_out_default_path_is_not_a_redirect,
                  test_installer_installs_every_reference,
                  test_kanban_watcher_reads_default_board,
                  test_named_board_is_not_the_default_board,

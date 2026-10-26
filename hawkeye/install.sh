@@ -37,10 +37,16 @@ set -euo pipefail
 REPO_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 UNIT_SRC="$REPO_DIR/config/systemd"
 DEFAULT_UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+# What each path flag would be without the flag: a flag only *redirects* the install when its
+# value really differs from this (see the unit-dir block below).
+DEFAULT_HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
+DEFAULT_CONFIG="${HAWKEYE_V2_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/hawkeye/hawkeye.toml}"
 UNIT_DIR="$DEFAULT_UNIT_DIR"
 UNIT_DIR_GIVEN=0
-REDIRECTED=0
-HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
+HOME_GIVEN=0
+CONFIG_GIVEN=0
+SKILL_GIVEN=0
+HERMES_HOME="$DEFAULT_HERMES_HOME"
 HAWKEYE_V2_CONFIG="${HAWKEYE_V2_CONFIG:-}"
 HAWKEYE_KERNEL_SRC="${HAWKEYE_KERNEL_SRC:-}"
 HAWKEYE_PYTHON="${HAWKEYE_PYTHON:-}"
@@ -91,12 +97,12 @@ usage() {
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --hermes-home)  HERMES_HOME="$2"; REDIRECTED=1; shift 2 ;;
-        --config)       HAWKEYE_V2_CONFIG="$2"; REDIRECTED=1; shift 2 ;;
+        --hermes-home)  HERMES_HOME="$2"; HOME_GIVEN=1; shift 2 ;;
+        --config)       HAWKEYE_V2_CONFIG="$2"; CONFIG_GIVEN=1; shift 2 ;;
         --kernel-src)   HAWKEYE_KERNEL_SRC="$2"; shift 2 ;;
         --python)       HAWKEYE_PYTHON="$2"; shift 2 ;;
         --unit-dir)     UNIT_DIR="$2"; UNIT_DIR_GIVEN=1; shift 2 ;;
-        --skill-dir)    SKILL_DEST="$2"; REDIRECTED=1; shift 2 ;;
+        --skill-dir)    SKILL_DEST="$2"; SKILL_GIVEN=1; shift 2 ;;
         --gate)         DO_GATE=1; shift ;;
         --profiles)     GATE_PROFILES="$2"; DO_GATE=1; shift 2 ;;
         --all-profiles) GATE_PROFILES=""; DO_GATE=1; shift ;;
@@ -122,8 +128,23 @@ HERMES_HOME="${HERMES_HOME/#\~/$HOME}"
 # HERMES_HOME and the hk path, so pointing them at a fixture silently disables the doctor on the
 # real machine (measured: 65 minutes of 203/EXEC while the timer kept firing). Derive a unit dir
 # under the redirect instead of refusing, and say so; --unit-dir still wins.
-if [ "$UNIT_DIR_GIVEN" = "0" ] && [ "$REDIRECTED" = "1" ]; then
+#
+# "Redirected" means a flag *moved the path it names*, not "a flag was passed". The documented
+# one-liner spells the default config out (it lives outside HERMES_HOME on this host), and
+# treating that as a fixture install moved a real host's units out of ~/.config/systemd/user --
+# the doctor then stops being started and nothing says why: #9's failure, one flag further in.
+_trim_slash() { printf '%s' "${1%/}"; }
+REDIRECTED=0
+if [ "$HOME_GIVEN" = "1" ] && [ "$(_trim_slash "$HERMES_HOME")" != "$(_trim_slash "$DEFAULT_HERMES_HOME")" ]; then
     REDIRECTED=1
+fi
+if [ "$CONFIG_GIVEN" = "1" ] && [ "$(_trim_slash "${HAWKEYE_V2_CONFIG/#\~/$HOME}")" != "$(_trim_slash "$DEFAULT_CONFIG")" ]; then
+    REDIRECTED=1
+fi
+if [ "$SKILL_GIVEN" = "1" ] && [ "$(_trim_slash "${SKILL_DEST/#\~/$HOME}")" != "$(_trim_slash "$HERMES_HOME/skills/software-development/hermes-hawkeye-v2")" ]; then
+    REDIRECTED=1
+fi
+if [ "$UNIT_DIR_GIVEN" = "0" ] && [ "$REDIRECTED" = "1" ]; then
     UNIT_DIR="$HERMES_HOME/systemd/user"
     note "redirected install: units go to $UNIT_DIR (pass --unit-dir to choose)"
 fi
@@ -201,6 +222,11 @@ note "hermes    : $HERMES_HOME"
 note "config    : $HAWKEYE_V2_CONFIG"
 note "kernel src: ${HAWKEYE_KERNEL_SRC:-<unset>}"
 note "units     : $UNIT_DIR"
+# Whatever moved them, never let a non-default unit dir pass silently: a doctor installed where
+# nobody looks is the failure this whole block exists to prevent.
+if [ "$(_trim_slash "$UNIT_DIR")" != "$(_trim_slash "$DEFAULT_UNIT_DIR")" ]; then
+    note "              (default is $DEFAULT_UNIT_DIR)"
+fi
 # Board resolution either goes through the Hermes kernel or through hawkeye's portable
 # fallback. A path that looks wrong used to cost the kernel branch silently, so probe it
 # instead of trusting the string: the import needs hermes_bootstrap (which wires the

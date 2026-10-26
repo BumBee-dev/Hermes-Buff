@@ -21,6 +21,13 @@ INCIDENT_UNREACHABLE = "agent_unreachable"
 INCIDENT_CRASH_LOOP = "phase_crash_loop"
 
 
+def _days_text(days: float) -> str:
+    """Retention may be fractional (a verification pass uses seconds); "0 days" hides that."""
+    if float(days).is_integer():
+        return "%d day%s" % (days, "" if days == 1 else "s")
+    return "%g days" % days
+
+
 def _prune_old_runs(cfg: dict) -> int:
     """Delete finished runs past ``retention_days``; incidents are evidence and stay.
 
@@ -33,7 +40,8 @@ def _prune_old_runs(cfg: dict) -> int:
     if days <= 0:
         return 0
     removed = 0
-    for rd in store.prunable_runs(store.run_root(), days):
+    grace = float(cfg.get("delivery_grace_seconds", 0) or 0)
+    for rd in store.prunable_runs(store.run_root(), days, grace_seconds=grace):
         shutil.rmtree(rd, ignore_errors=True)
         removed += 1
     return removed
@@ -123,8 +131,8 @@ def scan(cfg: dict, fix: bool = False) -> list[dict[str, Any]]:
     if fix:
         pruned = _prune_old_runs(cfg)
         if pruned:
-            print("[hawkeye] pruned %d finished run(s) older than %.0f days"
-                  % (pruned, float(cfg.get("retention_days", 0))))
+            print("[hawkeye] pruned %d finished run(s) older than %s"
+                  % (pruned, _days_text(float(cfg.get("retention_days", 0)))))
     for rd in sorted(root.iterdir()):
         if not rd.is_dir():
             continue
