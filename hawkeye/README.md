@@ -396,8 +396,8 @@ in the chat instead of a process that quietly stopped.
 ## 10. Self-tests
 
 ```bash
-python3 tests/selftest.py         # real subprocesses, 39 checks, ~30s (hk core)
-python3 tests/gate_selftest.py    # synthetic board database, 29 checks (completion-gate plugin)
+python3 tests/selftest.py         # real subprocesses, prints its own tally (hk core)
+python3 tests/gate_selftest.py    # synthetic board database (completion-gate plugin)
 ```
 
 Both suites must be green. The unreachable-agent check is timing-sensitive on purpose — it waits for

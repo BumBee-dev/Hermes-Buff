@@ -1389,6 +1389,31 @@ def test_set_cannot_overwrite_a_stop_verdict() -> None:
           out.strip().startswith("STOPPED"), "out=%r err=%r" % (out.strip()[:80], err.strip()[:200]))
 
 
+def test_the_sweep_and_gc_share_one_delivery_grace() -> None:
+    """#10(a): one key, one default, one reader.
+
+    `hk gc` defaulted the delivery grace to 300 and `doctor --fix` to 0, so the two sweepers could
+    disagree about the same run. It only looked harmless because config.load() merges DEFAULTS into
+    every config dict; a hand-built dict (an embedder, a test) got the split back. Both now read
+    store.delivery_grace(), and nothing else in the library may read that key on its own.
+    """
+    import importlib
+    lib = str(Path(__file__).resolve().parents[1] / "lib")
+    sys.path.insert(0, lib)
+    store = importlib.import_module("hawkeye.store")
+
+    check("grace: the default is the documented 300 s", store.delivery_grace({}) == 300.0,
+          repr(store.delivery_grace({})))
+    check("grace: a configured value wins", store.delivery_grace({"delivery_grace_seconds": 60}) == 60.0)
+    check("grace: a null value falls back instead of raising",
+          store.delivery_grace({"delivery_grace_seconds": None}) == 300.0)
+
+    owners = [p.name for p in (Path(lib) / "hawkeye").glob("*.py")
+              if '"delivery_grace_seconds"' in p.read_text() or "'delivery_grace_seconds'" in p.read_text()]
+    check("grace: only store.py and config.py name the key", sorted(owners) == ["config.py", "store.py"],
+          str(owners))
+
+
 def test_decision_inbox_round_trip() -> None:
     """Items that need a human call must outlive the session that produced them.
 
@@ -1496,6 +1521,7 @@ def main() -> int:
                  test_env_driven_install_is_also_a_redirect,
                  test_set_cannot_overwrite_a_stop_verdict,
                  test_a_spelled_out_default_path_is_not_a_redirect,
+                 test_the_sweep_and_gc_share_one_delivery_grace,
                  test_decision_inbox_round_trip,
                  test_installer_installs_every_reference,
                  test_kanban_watcher_reads_default_board,

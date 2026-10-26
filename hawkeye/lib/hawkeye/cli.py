@@ -367,7 +367,7 @@ def cmd_gc(args: argparse.Namespace, cfg: dict) -> int:
     # acknowledged yet must survive *any* sweep (measured: --days 0 --force removed a run 11s
     # after it reported). The grace lives in the shared verdict, not in this loop, because the
     # doctor sweep reads the same question and used to answer it differently (#10 follow-on).
-    grace = float(cfg.get("delivery_grace_seconds", 300) or 0)
+    grace = store.delivery_grace(cfg)
     removable: list[Path] = []
     kept: list[tuple[str, str]] = []
     for rd in sorted(root.iterdir()):

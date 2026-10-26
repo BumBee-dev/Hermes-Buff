@@ -33,7 +33,7 @@ DEFAULTS: dict[str, Any] = {
     # without it cache/hawkeye/runs grows for the life of the host
     "retention_days": 7.0,
     # a finished run whose wake has not been delivered yet is never swept inside this window
-    "delivery_grace_seconds": 300.0,              # doctor's restart budget for one run; over it, raise an incident instead of retrying
+    "delivery_grace_seconds": 300.0,
     "fallback_command": "",         # optional external page (stdin = one line)
 }
 

@@ -40,7 +40,7 @@ def _prune_old_runs(cfg: dict) -> int:
     if days <= 0:
         return 0
     removed = 0
-    grace = float(cfg.get("delivery_grace_seconds", 0) or 0)
+    grace = store.delivery_grace(cfg)
     for rd in store.prunable_runs(store.run_root(), days, grace_seconds=grace):
         shutil.rmtree(rd, ignore_errors=True)
         removed += 1

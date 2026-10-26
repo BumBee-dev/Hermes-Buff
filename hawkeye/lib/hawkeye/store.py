@@ -95,6 +95,24 @@ def file_lock(path: Path):
         os.close(fd)
 
 
+DEFAULT_DELIVERY_GRACE = 300.0
+
+
+def delivery_grace(cfg: dict) -> float:
+    """The one default for how long an undelivered report protects its run from the sweep.
+
+    gc and doctor used to default this key to different numbers (300 and 0), so the sweep was the
+    permissive side of a two-answer question. It only looked safe because config.load() merges
+    DEFAULTS into every config: any caller handing the sweep a hand-built dict got the old split.
+    """
+    raw = cfg.get("delivery_grace_seconds")
+    # An absent *or null* value means "use the default"; an explicit 0 means "no grace" and is
+    # honoured, because that is a decision somebody wrote down.
+    if raw is None:
+        raw = DEFAULT_DELIVERY_GRACE
+    return float(raw)
+
+
 def report_consumed(state: dict, lease: dict) -> bool:
     """True when a lease renewal happened at or after the last report.
 
