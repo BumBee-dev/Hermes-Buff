@@ -145,6 +145,7 @@ def _describe(rid: str) -> dict:
     state = store.read_json(rd / store.STATE, {}) or {}
     result = store.read_json(rd / store.RESULT, {}) or {}
     incident = store.read_json(rd / store.INCIDENT, {}) or {}
+    incident_open = bool(store.incident_active(rd))
     sup_age = store.mtime_age(rd / store.SUP_BEAT)
     lease = store.read_json(rd / store.LEASE, {}) or {}
     seen = float(lease.get("agent_seen") or 0)
@@ -160,7 +161,10 @@ def _describe(rid: str) -> dict:
         status = "unwatched"
     notes = []
     if incident:
-        notes.append("incident=%s" % incident.get("reason"))
+        # A withdrawn incident is history, not an open alarm: showing it as open made the one
+        # command a human reads first disagree with doctor, which had already closed it (#14).
+        notes.append("incident=%s%s" % (incident.get("reason"),
+                                       "" if incident_open else " (withdrawn)"))
     if state.get("last_exit_code") is not None:
         notes.append("exit=%s" % state["last_exit_code"])
     if state.get("deferred"):
@@ -171,7 +175,8 @@ def _describe(rid: str) -> dict:
         "reports": int(state.get("reports") or 0),
         "sup_age_s": None if sup_age is None else int(sup_age),
         "lease_age_s": None if not seen else int(time.time() - seen),
-        "incident": incident or None,
+        "incident": incident or None,          # raw document, audit trail included
+        "incident_open": incident_open,
         "note": ", ".join(notes),
     }
 

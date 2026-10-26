@@ -1402,6 +1402,53 @@ def test_set_cannot_overwrite_a_stop_verdict() -> None:
           out.strip().startswith("STOPPED"), "out=%r err=%r" % (out.strip()[:80], err.strip()[:200]))
 
 
+def test_status_shows_a_withdrawn_incident_as_withdrawn() -> None:
+    """`status` must not report a resolved incident as open (#14).
+
+    `d28b8e1` withdraws an `agent_unreachable` in place, and doctor stops counting it; `status` kept
+    reading the raw file, so the one command a human reads first disagreed with the one that had
+    already closed the incident. The note now says "(withdrawn)" and the row carries an explicit
+    `incident_open`, while the raw document stays in the row because `withdrawn_at` is the audit
+    trail.
+
+    Also pins the deliberate other half: a run whose incident was withdrawn is still kept as
+    evidence by the sweep, since the file is the record of a resolved alarm.
+    """
+    conf = cfg("status14")
+    root = BASE / "status14-runs"
+    root.mkdir()
+    now = time.time()
+    rd = root / "handled"
+    rd.mkdir()
+    (rd / "meta.json").write_text(json.dumps({"kind": "exec", "entry": "/bin/true"}))
+    # A *finished* run, so the sweep's reason is "has incident" rather than "not finished": the
+    # question here is whether a withdrawn incident still counts as evidence.
+    (rd / "state.json").write_text(json.dumps({
+        "finished": True, "finished_at": now - 600, "finish_reason": "done",
+        "reports": 1, "last_report_at": now - 600, "wakes": 1}))
+    (rd / "lease.json").write_text(json.dumps({"agent_seen": now - 597, "by": "agent"}))
+    (rd / "incident.json").write_text(json.dumps({
+        "reason": "agent_unreachable", "at": "2026-01-01T00:00:00Z", "detail": "opened too early"}))
+
+    hk(["doctor", "--fix"], conf, check=False, root=root)
+    rows = json.loads(hk(["status", "--all", "--json"], conf, root=root).stdout)
+    row = next((r for r in rows if r["run"] == "handled"), {})
+    check("status: a withdrawn incident is not reported as open", row.get("incident_open") is False,
+          str(row)[:200])
+    check("status: the note says so in words too",
+          "(withdrawn)" in (row.get("note") or ""), str(row.get("note")))
+    check("status: the raw document is kept as the audit trail",
+          bool((row.get("incident") or {}).get("withdrawn_at")), str(row.get("incident"))[:160])
+
+    text = hk(["status", "--all"], conf, root=root).stdout
+    check("status: the table shows the withdrawn marker", "incident=agent_unreachable (withdrawn)" in text,
+          text[-200:])
+
+    gc_out = hk(["gc", "--days", "0"], conf, root=root).stdout
+    check("gc: a withdrawn incident still keeps the run as evidence",
+          rd.is_dir() and "has incident" in gc_out, gc_out[-160:])
+
+
 def test_hk_finds_a_modern_interpreter_for_an_old_host() -> None:
     """hk must run on a host whose system python is 3.6 (Ubuntu 18.04, Debian 10).
 
@@ -1666,6 +1713,7 @@ def main() -> int:
                  test_env_driven_install_is_also_a_redirect,
                  test_set_cannot_overwrite_a_stop_verdict,
                  test_a_spelled_out_default_path_is_not_a_redirect,
+                 test_status_shows_a_withdrawn_incident_as_withdrawn,
                  test_hk_finds_a_modern_interpreter_for_an_old_host,
                  test_report_grace_is_measured_from_the_report,
                  test_a_consumed_report_withdraws_the_incident,
