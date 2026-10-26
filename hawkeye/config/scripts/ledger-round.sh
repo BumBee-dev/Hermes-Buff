@@ -64,23 +64,41 @@ _read_counter() {
 # `hk report --into` directly. `round.closed` only knows about the first kind, so the highest round
 # actually present in the ledger is read too -- otherwise a record happily writes 第 5 轮 twice
 # because it cannot see the 第 6 轮 somebody else appended.
-_ledger_max() {
-  [ -n "${IW_LEDGER:-}" ] || { printf '0'; return 0; }
-  [ -f "${HERMES_HOME:-}/state.db" ] || { printf '0'; return 0; }
-  LEDGER_MAX=$(IW_DB="${HERMES_HOME}/state.db" IW_SID="$IW_LEDGER" "${IW_PYTHON:-python3}" -c '
-import os, re, sqlite3
+_read_ledger_max() {
+  LEDGER_MAX=0
+  [ -n "${IW_LEDGER:-}" ] || return 0
+  [ -f "${HERMES_HOME:-}/state.db" ] || return 0
+  local out
+  if ! out=$(IW_DB="${HERMES_HOME}/state.db" IW_SID="$IW_LEDGER" "${IW_PYTHON:-python3}" -c '
+import os, re, sqlite3, sys
 try:
     con = sqlite3.connect("file:%s?mode=ro" % os.environ["IW_DB"], uri=True)
-    best = 0
-    for (text,) in con.execute("select content from messages where session_id = ?", (os.environ["IW_SID"],)):
-        for n in re.findall(r"第\s*(\d+)\s*轮", text or ""):
-            best = max(best, int(n))
-    print(best)
-except Exception:
-    print(0)
-' 2>/dev/null)
-  case "${LEDGER_MAX:-}" in ''|*[!0-9]*) LEDGER_MAX=0 ;; esac
-  printf '%s' "$LEDGER_MAX"
+    rows = [r[0] for r in con.execute(
+        "select content from messages where session_id = ?", (os.environ["IW_SID"],))]
+except Exception as exc:
+    print(exc, file=sys.stderr)
+    sys.exit(3)
+# Count only entry *headings*. A ledger body routinely quotes round numbers ("the old bug wrote
+# 第 19 轮 twice"), and an unanchored scan reads that sentence as the maximum and skips every round
+# in between. Fenced blocks are dropped for the same reason.
+fence = re.compile(r"```.*?```", re.S)
+head = re.compile(r"^\s*(?:#{1,6}\s*)?(?:\[[^\]\n]{0,40}\]\s*)?第\s*(\d+)\s*轮", re.M)
+best = 0
+for text in rows:
+    if not text:
+        continue
+    for m in head.finditer(fence.sub("", text)):
+        n = int(m.group(1))
+        if n > best:
+            best = n
+print(best)
+' 2>/dev/null); then
+    # "Cannot read it" must not mean "it is empty": the ledger is a writer too, and guessing 0 here
+    # silently produces a duplicate round (the same class as the corrupt counter).
+    _die "cannot read ledger $IW_LEDGER to find the highest round; refusing to guess"
+  fi
+  case "${out:-}" in ''|*[!0-9]*) _die "unexpected ledger scan result \"$out\"; refusing to guess" ;; esac
+  LEDGER_MAX=$out
 }
 
 _lock() { exec 9>>"$LOCK"; flock 9; }
@@ -92,7 +110,7 @@ _alloc() {
   _lock
   _read_counter
   local lmax
-  lmax=$(_ledger_max)
+  _read_ledger_max; lmax=$LEDGER_MAX
   [ "$lmax" -gt "$CURRENT" ] && CURRENT=$lmax
   CURRENT=$((CURRENT + 1))
   printf '%s\n' "$CURRENT" > "$COUNTER"
@@ -174,7 +192,7 @@ case "${1:-}" in
     pinned=0
     [ -f "$PINNED" ] && pinned=$(tr -d '[:space:]' < "$PINNED" 2>/dev/null)
     case "$pinned" in ''|*[!0-9]*) pinned=0 ;; esac
-    lmax=$(_ledger_max)
+    _read_ledger_max; lmax=$LEDGER_MAX
     if [ "$pinned" -gt 0 ]; then
       # An explicit `reuse N` is the caller saying which round this is. Honouring it is the point of
       # the verb -- but it must not resurrect a number the ledger already holds, or the record becomes

@@ -52,7 +52,10 @@ Python >= 3.11), this **skill** (the agent-side procedure), and an optional
   (`install -m 755 "$REPO_DIR/config/scripts/<name>" "$HERMES_HOME/scripts/<name>"`), grep
   `config/scripts/*.sh` out of `SKILL.md` in the same completeness loop that greps `references/*.md`, and
   `die` when one is missing — otherwise the first fresh install invents its own copy, and the numbers,
-  the format and the state paths diverge between hosts.
+  the format and the state paths diverge between hosts. A host-side wrapper should then `exec` the
+  **installed** copy (`$HERMES_HOME/scripts/<name>`) and fall back to the checkout only when it is absent:
+  a wrapper pointed at the checkout keeps running the old file after a pull-and-reinstall, and silently
+  runs a second implementation that the completeness check never looks at.
 - **The host's home directory is a published list; this tool adds nothing to its top.** Runtime
   artefacts live under `<HERMES_HOME>/cache/<tool>/` (the shape Hermes uses for its own tool caches:
   `cache/scratch`, `cache/<name>.json`), configuration under  `$XDG_CONFIG_HOME/<tool>/`, and
@@ -125,6 +128,12 @@ Start it with `hk run --id <id> -- /bin/bash <script>` (same three flags). The j
 exits, the phase reports, the session wakes, and the wake turn quotes the milestone
 text back to the user. The `sleep` has to be longer than your estimate of the time
 left in the current turn.
+
+**Prove the chain without waiting for a real event.** Append one line to the file the watcher polls:
+the watcher exits within one poll interval, the phase reports `done`, and the wake lands in this session
+(measured: 32 s end to end). Do this after every change to the arming path — the exit is the only wake
+channel, so a watcher that quietly failed to arm is indistinguishable from a watcher with no news, and
+the user's only symptom is "I never heard anything".
 
 ## Dispatch parameters (set them on the card, never inherit them)
 
@@ -206,7 +215,17 @@ one model, treat the first two as mandatory.
   out of the session (a read-only sqlite query is enough — no kernel boot), allocate above
   `max(counter, closed, ledger_max)`, and keep a number allocated by `detect` only while nothing else
   has claimed it. State the rule as "sequence order equals number order": hold the lock across the
-  read **and** the append, or a later cycle can land before the entry it belongs after.
+  read **and** the append, or a later cycle can land before the entry it belongs after. Three more of
+  the same family, each worth its own assertion: **absent is not corrupt** — a missing counter means 0,
+  but a counter that exists and does not parse is a truncated write, so refuse instead of renumbering
+  from 1 (the renumber collides with rounds already in the record); **a failed append must not consume
+  the round** — keep the entry file, exit non-zero and name it, since the number is already allocated and
+  the retry is the same report call, whereas deleting it on failure reports success while the finding
+  exists nowhere; and **an explicit pin is honoured once, then refused if it would duplicate** —
+  `reuse N` is the caller stating which round this is, the next `record` writes N and consumes the pin,
+  and a pin onto a number the record already holds refuses (exit 2, message naming the highest round).
+  Honouring the pin and never writing a round twice are both promises; the refusal is what keeps them
+  from contradicting, so do not "fix" a refusal by silently allocating N+1.
 - **An appended message is permanent**: the kernel exposes no per-message
   delete, so a numbering test pointed at the live ledger leaves an entry nothing can remove — exercise
   the helper against a fixture session, and if junk does land, append a correction that names the

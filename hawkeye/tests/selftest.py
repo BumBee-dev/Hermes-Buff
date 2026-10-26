@@ -1248,6 +1248,42 @@ def test_ledger_round_allocator_is_shipped_and_serialised() -> None:
           dup.returncode == 0 and dup2.returncode == 2 and "already exists" in (dup2.stderr or ""),
           "rc=%s %s" % (dup2.returncode, (dup2.stderr or "")[-140:]))
 
+    # The scan counts entry *headings*, not every "第 N 轮" in the text: a ledger body routinely quotes
+    # round numbers, and an unanchored scan reads that sentence as the maximum and skips the rounds in
+    # between (reported: 8 -> 20 on a healthy ledger). Fenced blocks are excluded for the same reason.
+    prose_home = BASE / "ledger-prose-home"
+    prose_home.mkdir()
+    con = sqlite3.connect(str(prose_home / "state.db"))
+    con.execute("create table messages (id integer primary key, session_id text, content text)")
+    for n in range(1, 9):
+        con.execute("insert into messages(session_id, content) values (?, ?)",
+                    ("led", "## 第 %d 轮 · heading\n\nbody" % n))
+    con.execute("insert into messages(session_id, content) values (?, ?)",
+                ("led", "## 第 6 轮 · quoting\nthe old bug wrote 第 19 轮 twice"))
+    con.execute("insert into messages(session_id, content) values (?, ?)",
+                ("led", "## 第 7 轮 · fenced\n```\n第 40 轮 · example\n```"))
+    con.commit(); con.close()
+    (prose_home / "round.current").write_text("8\n")
+    (prose_home / "round.closed").write_text("8\n")
+    penv2 = {**ENV, "IW_STATE_DIR": str(prose_home), "HERMES_HOME": str(prose_home), "IW_LEDGER": "led"}
+    subprocess.run(["bash", str(script), "detect", str(raw2)], env=penv2, capture_output=True, timeout=60)
+    check("ledger-round: quoted round numbers do not inflate the ledger scan",
+          (prose_home / "round.current").read_text().strip() == "9",
+          "counter=" + (prose_home / "round.current").read_text().strip())
+
+    # "Cannot read the ledger" must not mean "it is empty": that would write a duplicate round.
+    broken_home = BASE / "ledger-broken-home"
+    broken_home.mkdir()
+    (broken_home / "state.db").write_bytes(b"not a database")
+    (broken_home / "round.current").write_text("8\n")
+    (broken_home / "round.closed").write_text("8\n")
+    benv = {**ENV, "IW_STATE_DIR": str(broken_home), "HERMES_HOME": str(broken_home), "IW_LEDGER": "led"}
+    broke = subprocess.run(["bash", str(script), "record", "unreadable", str(body)], env=benv,
+                           capture_output=True, text=True, timeout=60)
+    check("ledger-round: an unreadable ledger is refused, not treated as empty",
+          broke.returncode == 2 and "cannot read ledger" in (broke.stderr or ""),
+          "rc=%s %s" % (broke.returncode, (broke.stderr or "")[-140:]))
+
     # A counter in a second conventional location is a second numbering; it cannot be seen from the
     # output, so the allocator has to say it.
     split_home = BASE / "ledger-split-home"
