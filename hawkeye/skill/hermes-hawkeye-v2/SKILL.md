@@ -168,11 +168,17 @@ one model, treat the first two as mandatory.
   *ending*, so the window is one-shot and re-arming is the wake turn's first obligation. Never leave
   a monitor stopped without saying so in the chat.
 - **A round is numbered, and the source window gets three lines.** Every cycle is one ledger entry
-  titled `第 N 轮 · <one-line conclusion>`; the number is allocated by a helper script, never by hand,
+  titled `第 N 轮 · <one-line conclusion>`; the number is allocated by
+  `config/scripts/ledger-round.sh` (`peek` / `next` / `reuse N` / `detect` / `record`), never by hand,
   so a cron tick, a wake turn and a human agree on which round they are in. The detail — what was said,
   what changed, how it was verified, the commit, the reply link — lives only in that entry. The
   conversation that owns the wake gets a short summary and a pointer to the round: long reports belong
-  in the child session, or the main window becomes the log.
+  in the child session, or the main window becomes the log. The counter lives next to the ledger in
+  the run cache, and the allocator is the shipped script, not the turn's own bookkeeping. **An
+  appended message is permanent**: the kernel exposes no per-message
+  delete, so a numbering test pointed at the live ledger leaves an entry nothing can remove — exercise
+  the helper against a fixture session, and if junk does land, append a correction that names the
+  bogus entry rather than pretending the record is clean.
 - **Internal records are in the user's language; platform-facing text is not.** A GitHub reply is
   English because the audience is the upstream maintainers; the ledger entry, the wake summary and the
   session title are Chinese because the reader is the user. Do not let the outward language leak into
@@ -523,3 +529,5 @@ sandbox-testing `install.sh` with a stub CLI, verifying a push through the API i
 can break) is in `references/kernel-surfaces.md`. Reporting into the conversation that started
 the work — TTL shape, wake latency, the report-cadence trap, child-session reports, proving no new
 session window appeared, and the stop/pgrep pitfalls — is in `references/in-session-watch.md`.
+A numbered, language-consistent ledger entry is written with `config/scripts/ledger-round.sh`
+(`detect` allocates the round, `record` reuses it, `peek`/`next`/`reuse N` are the raw verbs).

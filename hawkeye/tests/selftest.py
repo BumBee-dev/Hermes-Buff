@@ -1084,6 +1084,52 @@ def test_gate_check_says_when_it_cannot_ask_the_cli() -> None:
           proc2.returncode == 1 and "./install.sh --gate" in out2, out2[-300:])
 
 
+def test_ledger_round_allocator_is_shipped_and_serialised() -> None:
+    """The round allocator must be in the tree, and two callers in one tick must not collide.
+
+    Filed as #17: a skill rule said "the number is allocated by a helper script", and no such script
+    existed in the repository — so on a fresh install the instruction was literally unexecutable, and
+    each host would invent its own numbering (which is the drift the rule exists to prevent). This test
+    asserts the shipped script's three raw verbs, plus the one property that makes a shared counter
+    safe: concurrent allocation yields two *different*, adjacent numbers.
+    """
+    script = Path(__file__).resolve().parents[1] / "config" / "scripts" / "ledger-round.sh"
+    check("ledger-round: the allocator ships in the tree", script.is_file(), str(script))
+    if not script.is_file():
+        return
+    work = BASE / "ledger-round-state"
+    work.mkdir()
+    env = {**ENV, "IW_STATE_DIR": str(work), "HERMES_HOME": str(BASE)}
+
+    def run(*args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(["bash", str(script), *args], capture_output=True, text=True,
+                              env=env, timeout=60)
+
+    first = run("peek")
+    check("ledger-round: peek on a fresh state is 0", first.stdout.strip() == "0", first.stdout.strip())
+
+    procs = [subprocess.Popen(["bash", str(script), "next"], stdout=subprocess.PIPE, text=True,
+                              env=env) for _ in range(2)]
+    got = sorted(int(p.communicate()[0].strip()) for p in procs)
+    check("ledger-round: two concurrent allocations give two different numbers",
+          len(set(got)) == 2, str(got))
+    check("ledger-round: the concurrent numbers are adjacent", got == [1, 2], str(got))
+
+    pinned = run("reuse", "7")
+    check("ledger-round: reuse pins the counter", pinned.stdout.strip() == "7", pinned.returncode)
+    check("ledger-round: peek stays stable after reuse",
+          run("peek").stdout.strip() == "7" and run("peek").stdout.strip() == "7")
+
+    # Entries need a ledger to append to: without IW_LEDGER the tool must refuse rather than write
+    # somewhere. (The writing path itself is covered by the ledger tests, which have a real session.)
+    body = BASE / "ledger-round-body.md"
+    body.write_text("x\n")
+    refused = subprocess.run(["bash", str(script), "record", "t", str(body)], capture_output=True,
+                             text=True, env={**env, "IW_LEDGER": ""}, timeout=60)
+    check("ledger-round: a record with no ledger is refused",
+          refused.returncode != 0 and "IW_LEDGER" in (refused.stderr or ""), refused.stderr[-200:])
+
+
 def test_report_can_append_to_one_ledger_child() -> None:
     """A recurring producer must be able to keep writing into the *same* child session.
 
@@ -2022,6 +2068,7 @@ def main() -> int:
                  test_interpreter_probe_ignores_a_hostile_pythonpath,
                  test_hk_survives_a_lying_pythonpath_across_the_reexec,
                  test_gate_check_says_when_it_cannot_ask_the_cli,
+                 test_ledger_round_allocator_is_shipped_and_serialised,
                  test_issue_watch_reports_replies_on_closed_issues,
                  test_report_can_append_to_one_ledger_child,
                  test_kernel_branch_resolves_board_paths,
