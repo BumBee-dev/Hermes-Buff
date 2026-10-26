@@ -111,8 +111,15 @@ _unlock() { flock -u 9; exec 9>&-; }
 _alloc() {
   _lock
   _read_counter
-  local lmax
+  local lmax closed
   _read_ledger_max; lmax=$LEDGER_MAX
+  closed=0
+  [ -f "$CLOSED" ] && closed=$(tr -d '[:space:]' < "$CLOSED" 2>/dev/null)
+  case "$closed" in ''|*[!0-9]*) closed=0 ;; esac
+  # `closed` counts: it is the only record that survives a summarised message losing its heading, and
+  # an allocator that forgets it rewinds into rounds the ledger already has (reported: pinned write of
+  # 20, ledger trimmed, `next` -> 7).
+  [ "$closed" -gt "$CURRENT" ] && CURRENT=$closed
   [ "$lmax" -gt "$CURRENT" ] && CURRENT=$lmax
   CURRENT=$((CURRENT + 1))
   printf '%s\n' "$CURRENT" > "$COUNTER"
@@ -165,6 +172,15 @@ case "${1:-}" in
     if [ -f "$PINNED" ]; then
       p=$(tr -d '[:space:]' < "$PINNED" 2>/dev/null)
       case "$p" in ''|*[!0-9]*) ;; *) CURRENT=$p ;; esac
+    else
+      # A consumed pin leaves `closed` ahead of the counter, so peeking the counter alone reported a
+      # number rounds behind the ledger (14 in the reported case). Same fact, same three sources.
+      closed=0
+      [ -f "$CLOSED" ] && closed=$(tr -d '[:space:]' < "$CLOSED" 2>/dev/null)
+      case "$closed" in ''|*[!0-9]*) closed=0 ;; esac
+      _read_ledger_max
+      [ "$closed" -gt "$CURRENT" ] && CURRENT=$closed
+      [ "$LEDGER_MAX" -gt "$CURRENT" ] && CURRENT=$LEDGER_MAX
     fi
     _say; echo "$CURRENT" ;;
   next)
@@ -204,7 +220,7 @@ case "${1:-}" in
       # the duplicate the allocator exists to prevent. Refusing keeps both promises.
       if [ "$lmax" -ge "$pinned" ]; then
         _unlock
-        _die "第 $pinned 轮 already exists in the ledger (highest is $lmax); pin a number above it"
+        _die "第 $pinned 轮 already exists in the ledger (highest is $lmax); pin a number above it (the pin is retained -- re-pin to change it)"
       fi
       CURRENT=$pinned
     elif [ "$CURRENT" -eq 0 ] || [ "$closed" -ge "$CURRENT" ] || [ "$lmax" -ge "$CURRENT" ]; then
@@ -229,6 +245,8 @@ case "${1:-}" in
     fi
     _unlock
     printf '%s\n' "$CURRENT" > "$CLOSED"
+    # The counter has to move with the write as well, or the next `peek` reports the pre-pin value.
+    printf '%s\n' "$CURRENT" > "$COUNTER"
     rm -f "$PINNED"          # a pin is consumed by the write it described
     rm -f "$entry"
     _say

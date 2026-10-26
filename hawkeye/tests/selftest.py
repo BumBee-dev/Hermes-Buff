@@ -1203,6 +1203,7 @@ def test_ledger_round_allocator_is_shipped_and_serialised() -> None:
     raw2 = BASE / "ledger-foreign-raw.json"
     raw2.write_text('{"n": 2}\n')
     (foreign_home / "round.current").write_text("5\n")
+    (foreign_home / "round.closed").write_text("5\n")   # the previous record advanced it
     subprocess.run(["bash", str(script), "detect", str(raw2)], env=fenv, capture_output=True,
                    text=True, timeout=60)
     check("ledger-round: allocation starts above the ledger, not above its own counter",
@@ -1293,6 +1294,41 @@ def test_ledger_round_allocator_is_shipped_and_serialised() -> None:
     check("ledger-round: an abandoned pin does not steer the next detect",
           (pin2_home / "round.current").read_text().strip() == "7",
           "counter=" + (pin2_home / "round.current").read_text().strip())
+
+    # `closed` has to be readable by every consumer, not only by `record`: a consumed pin leaves the
+    # counter behind, and a summarised message loses its heading, so `peek` under-reported and `next`
+    # rewound into rounds the ledger already had.
+    tail_home = BASE / "ledger-closed-readers"
+    tail_home.mkdir()
+    con = sqlite3.connect(str(tail_home / "state.db"))
+    con.execute("create table messages (id integer primary key, session_id text, content text)")
+    for n in range(1, 7):
+        con.execute("insert into messages(session_id, content) values (?, ?)",
+                    ("led", "## 第 %d 轮 · heading\n\nbody" % n))
+    con.commit(); con.close()
+    (tail_home / "round.current").write_text("6\n")
+    (tail_home / "round.closed").write_text("6\n")
+    tail_stub = tail_home / "stub-hk"
+    tail_stub.write_text("#!/bin/bash\nexit 0\n")
+    tail_stub.chmod(0o755)
+    tenv = {**ENV, "IW_STATE_DIR": str(tail_home), "HERMES_HOME": str(tail_home),
+            "IW_LEDGER": "led", "IW_HK": str(tail_stub)}
+
+    def ts(*args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(["bash", str(script), *args], capture_output=True, text=True,
+                              env=tenv, timeout=60)
+
+    ts("reuse", "20")
+    ts("record", "pinned write", str(body))
+    check("ledger-round: peek reports the written round after a pinned write",
+          ts("peek").stdout.strip() == "20", "peek=" + ts("peek").stdout.strip())
+
+    # The ledger's copy of that message loses its heading (compaction): `closed` is the only memory.
+    con = sqlite3.connect(str(tail_home / "state.db"))
+    con.execute("delete from messages where content like '%第 20 轮%'")
+    con.commit(); con.close()
+    check("ledger-round: allocation still respects a round the ledger no longer shows",
+          ts("next").stdout.strip() == "21", "next=" + ts("next").stdout.strip())
 
     # The anchor requires one of the two documented forms: with both prefixes optional, a body
     # paragraph starting at column 0 with "第 12 轮 · …" counted as a heading and inflated the maximum.
