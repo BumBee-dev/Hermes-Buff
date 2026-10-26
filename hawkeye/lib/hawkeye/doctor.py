@@ -128,6 +128,7 @@ def scan(cfg: dict, fix: bool = False) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     if not root.is_dir():
         return rows
+    now = time.time()
     if fix:
         pruned = _prune_old_runs(cfg)
         if pruned:
@@ -168,17 +169,28 @@ def scan(cfg: dict, fix: bool = False) -> list[dict[str, Any]]:
             else:
                 action = "cannot restart (meta.entry missing)"
 
-        incident = bool(store.read_json(rd / store.INCIDENT, {}))
-        # A report nobody acknowledged is the dangerous case -- but "acknowledged" is relative to
-        # the report, not to the clock. A notifier reports, wakes the session, takes its lease and
-        # ends; comparing the lease age to *now* flagged every one of those healthy runs one grace
-        # window later (#10). Only a report with no lease after it may raise.
-        if (int(state.get("reports") or 0) > 0
-                and not store.report_consumed(state, lease)
-                and lease_age > float(cfg["wake_grace_seconds"])):
-            if _open_incident(cfg, rd, state, lease_age):
+        incident_doc = store.incident_active(rd)
+        incident = bool(incident_doc)
+        reports = int(state.get("reports") or 0)
+        last_report = float(state.get("last_report_at") or 0)
+        consumed = store.report_consumed(state, lease)
+        # The grace is how long the report itself may sit unclaimed. Measuring it from the lease
+        # meant a run that was legitimately quiet for hours (a watcher) had a lease_age of hours at
+        # the moment it reported, so the incident opened ~2 s later, before the wake could possibly
+        # lease (#13). Fall back to the lease age only when there is no report to anchor on.
+        waited = (now - last_report) if last_report else lease_age
+        if reports > 0 and not consumed and waited > float(cfg["wake_grace_seconds"]):
+            if _open_incident(cfg, rd, state, waited):
                 incident = True
                 action = (action + "; " if action else "") + "incident raised"
+        elif consumed and (incident_doc or {}).get("reason") == INCIDENT_UNREACHABLE:
+            # The report did reach its agent; an incident left open would keep describing a moment
+            # that has passed -- and keep doctor at exit 1 on a run that was handled.
+            store.write_json(rd / store.INCIDENT, {**incident_doc, "withdrawn_at": store.now_iso(),
+                                                  "withdrawn_because": "the report was consumed"})
+            store.append_event(rd, "incident_withdrawn", reason=INCIDENT_UNREACHABLE)
+            incident = False
+            action = (action + "; " if action else "") + "incident withdrawn (report consumed)"
 
         rows.append({
             "run": rd.name,

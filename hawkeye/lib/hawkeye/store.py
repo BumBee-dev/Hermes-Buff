@@ -118,6 +118,16 @@ def delivery_grace(cfg: dict) -> float:
     return float(raw)
 
 
+def incident_active(rd: Path) -> dict:
+    """The open incident for a run, or {} when there is none (or it was withdrawn).
+
+    Withdrawing keeps the file: it records that something looked wrong and what settled it, which
+    is the difference between "this never happened" and "this was resolved".
+    """
+    doc = read_json(rd / INCIDENT, {}) or {}
+    return {} if doc.get("withdrawn_at") else doc
+
+
 def report_consumed(state: dict, lease: dict) -> bool:
     """True when a lease renewal happened at or after the last report.
 

@@ -827,9 +827,21 @@ def test_report_creates_a_child_session() -> None:
         "db.close()\n"
         "print('SEEDED')\n" % src
     )
-    seeded = subprocess.run([sys.executable, "-c", seed], capture_output=True, text=True,
-                            env=env, timeout=180)
+    # A throwaway HERMES_HOME makes hermes_bootstrap treat the install as stale and *rebuild* the
+    # isolated runtime: measured 220 s and 1.7 GB per run on a host where the fixture home is not
+    # current, which turned this test into a timeout FAIL (and left 1.3 G in the kept failure site)
+    # instead of the SKIP the branch below is meant to provide (#12). The variable makes the import
+    # side-effect free -- 0.57 s, 336 K -- and the timeout stays as a tripwire that SKIPs.
+    env = {**env, "HERMES_DISABLE_LAZY_INSTALLS": "1"}
+    try:
+        seeded = subprocess.run([sys.executable, "-c", seed], capture_output=True, text=True,
+                                env=env, timeout=180)
+    except subprocess.TimeoutExpired:
+        shutil.rmtree(home, ignore_errors=True)
+        print("  SKIP report: seeding a session db timed out")
+        return
     if "SEEDED" not in seeded.stdout:
+        shutil.rmtree(home, ignore_errors=True)
         tail = (seeded.stderr or "").strip().splitlines()[-1:] or ["no output"]
         print("  SKIP report: cannot seed a session db (%s)" % tail[0])
         return
@@ -1389,6 +1401,66 @@ def test_set_cannot_overwrite_a_stop_verdict() -> None:
           out.strip().startswith("STOPPED"), "out=%r err=%r" % (out.strip()[:80], err.strip()[:200]))
 
 
+def test_report_grace_is_measured_from_the_report() -> None:
+    """A long-running run's report must not look like an abandoned one two seconds later (#13).
+
+    The grace answers "how long may this report sit unclaimed". Measuring it from the lease meant a
+    watcher that had legitimately been quiet for hours (lease_age in the thousands) tripped
+    `agent_unreachable` the moment it reported -- before the wake turn could possibly lease -- and
+    the incident then kept doctor at exit 1 on a run that was handled.
+    """
+    conf = cfg("grace13", wake_grace_seconds=2.0)
+    root = BASE / "grace13-runs"
+    root.mkdir()
+    now = time.time()
+
+    def fixture(name: str, last_report_age: float, lease_age: float) -> Path:
+        rd = root / name
+        rd.mkdir()
+        (rd / "meta.json").write_text(json.dumps({"kind": "exec", "entry": "/bin/true"}))
+        (rd / "state.json").write_text(json.dumps({
+            "finished": False, "reports": 1, "last_report_at": now - last_report_age,
+            "wakes": 1, "last_reason": "running"}))
+        (rd / "lease.json").write_text(json.dumps({"agent_seen": now - lease_age, "by": "agent"}))
+        return rd
+
+    fresh = fixture("fresh-report", last_report_age=1, lease_age=5000)
+    stale = fixture("stale-report", last_report_age=100, lease_age=5000)
+    result = hk(["doctor", "--fix", "--json"], conf, check=False, root=root)
+    rows = {r["run"]: r for r in json.loads(result.stdout or "[]")}
+    check("grace from report: a long-quiet run that just reported raises nothing",
+          rows.get("fresh-report", {}).get("incident") is False, str(rows.get("fresh-report")))
+    check("grace from report: the same run does raise once the report itself is stale",
+          rows.get("stale-report", {}).get("incident") is True, str(rows.get("stale-report")))
+    check("grace from report: no incident file for the fresh one", not (fresh / "incident.json").is_file())
+    check("grace from report: an incident file for the stale one", (stale / "incident.json").is_file())
+
+
+def test_a_consumed_report_withdraws_the_incident() -> None:
+    """Once the report reaches its agent, an open incident describes a moment that has passed."""
+    conf = cfg("withdraw13", wake_grace_seconds=0.3)
+    root = BASE / "withdraw13-runs"
+    root.mkdir()
+    now = time.time()
+    rd = root / "handled"
+    rd.mkdir()
+    (rd / "meta.json").write_text(json.dumps({"kind": "exec", "entry": "/bin/true"}))
+    (rd / "state.json").write_text(json.dumps({
+        "finished": False, "reports": 1, "last_report_at": now - 600, "wakes": 1}))
+    (rd / "lease.json").write_text(json.dumps({"agent_seen": now - 597, "by": "agent"}))
+    (rd / "incident.json").write_text(json.dumps({
+        "reason": "agent_unreachable", "at": "2026-01-01T00:00:00Z", "detail": "opened too early"}))
+
+    result = hk(["doctor", "--fix", "--json"], conf, check=False, root=root)
+    rows = {r["run"]: r for r in json.loads(result.stdout or "[]")}
+    doc = json.loads((rd / "incident.json").read_text())
+    check("withdraw: the row no longer reports an incident", rows.get("handled", {}).get("incident") is False,
+          str(rows.get("handled")))
+    check("withdraw: the file is kept and marked withdrawn",
+          bool(doc.get("withdrawn_at")) and doc.get("reason") == "agent_unreachable", json.dumps(doc)[:160])
+    check("withdraw: doctor exits 0 once nothing is open", result.returncode == 0, str(result.returncode))
+
+
 def test_the_sweep_and_gc_share_one_delivery_grace() -> None:
     """#10(a): one key, one default, one reader -- measured on a root of its own.
 
@@ -1542,6 +1614,8 @@ def main() -> int:
                  test_env_driven_install_is_also_a_redirect,
                  test_set_cannot_overwrite_a_stop_verdict,
                  test_a_spelled_out_default_path_is_not_a_redirect,
+                 test_report_grace_is_measured_from_the_report,
+                 test_a_consumed_report_withdraws_the_incident,
                  test_the_sweep_and_gc_share_one_delivery_grace,
                  test_decision_inbox_round_trip,
                  test_installer_installs_every_reference,
