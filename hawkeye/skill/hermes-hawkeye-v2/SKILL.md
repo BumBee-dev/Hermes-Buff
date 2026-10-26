@@ -167,6 +167,12 @@ one model, treat the first two as mandatory.
   the work and **re-arms the next window**. Exit-on-detection is not laziness: a wake is a job
   *ending*, so the window is one-shot and re-arming is the wake turn's first obligation. Never leave
   a monitor stopped without saying so in the chat.
+- **A round is numbered, and the source window gets three lines.** Every cycle is one ledger entry
+  titled `第 N 轮 · <one-line conclusion>`; the number is allocated by a helper script, never by hand,
+  so a cron tick, a wake turn and a human agree on which round they are in. The detail — what was said,
+  what changed, how it was verified, the commit, the reply link — lives only in that entry. The
+  conversation that owns the wake gets a short summary and a pointer to the round: long reports belong
+  in the child session, or the main window becomes the log.
 - **Internal records are in the user's language; platform-facing text is not.** A GitHub reply is
   English because the audience is the upstream maintainers; the ledger entry, the wake summary and the
   session title are Chinese because the reader is the user. Do not let the outward language leak into
