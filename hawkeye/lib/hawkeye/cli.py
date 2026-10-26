@@ -287,6 +287,20 @@ def cmd_report(args: argparse.Namespace, cfg: dict) -> int:
     path = Path(args.file)
     if not path.is_file():
         return _err("report file not found: %s" % path, 2)
+    into = (getattr(args, "into", "") or "").strip()
+    if into:
+        # One ledger, many entries: a recurring producer (an issue watcher) that appended a new
+        # child session per cycle would rebuild the very clutter the child-session rule avoids.
+        try:
+            rid = report.append_child(into, args.title, path.read_text(encoding="utf-8"))
+        except Exception as exc:                  # noqa: BLE001 - a report is never worth a crash
+            sys.stderr.write("hk: could not append to %s (%s)\n" % (into, exc))
+            return 1
+        print("%sreport: appended to %s (message %d)"
+              % (str(cfg.get("milestone_prefix", "HK-MS ")), into, rid))
+        return 0
+    if not (args.parent or "").strip():
+        return _err("report needs --parent (new child) or --into (append to an existing child)", 2)
     try:
         sid = report.write_child(args.parent, args.title, path.read_text(encoding="utf-8"),
                                  source=args.source)
@@ -440,7 +454,9 @@ def build_parser() -> argparse.ArgumentParser:
             sp.add_argument("--json", action="store_true")
 
     rp = sub.add_parser("report", help="write a report as a child session under an existing session")
-    rp.add_argument("--parent", required=True, help="session id the report belongs to")
+    rp.add_argument("--parent", default="", help="session id the report belongs to (creates a child)")
+    rp.add_argument("--into", default="",
+                    help="append to this existing child session instead of creating a new one (ledger)")
     rp.add_argument("--file", required=True, help="file whose contents become the report")
     rp.add_argument("--title", default="hawkeye report", help="display name for the child session")
     rp.add_argument("--source", default="hawkeye", help="session source label")

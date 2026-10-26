@@ -150,6 +150,14 @@ one model, treat the first two as mandatory.
   about — that is the failure mode, not the leak itself. Prefer: systemd unit (visible via
   `systemctl`, dies with the host) for mechanical work, and a bounded `hk run` watcher whose exit
   wakes this session for notification.
+- **A recurring producer writes into one ledger, not one child per cycle.** `hk report --parent`
+  creates a child; `hk report --into <sid>` appends to an existing one, stamped per entry. A poll
+  loop that reported each cycle as a fresh child would rebuild the sidebar clutter one level down.
+  The loop shape: poll (0 tokens, heartbeat so stall detection sees it alive) → on change, append the
+  finding with `--into`, mark it seen, **exit** → the exit wakes this session → the wake turn does
+  the work and **re-arms the next window**. Exit-on-detection is not laziness: a wake is a job
+  *ending*, so the window is one-shot and re-arming is the wake turn's first obligation. Never leave
+  a monitor stopped without saying so in the chat.
 - **A report is a child of the session that asked for the work — never a new window.** The user's
   only view is the sidebar, so an unattended loop that mints its own top-level sessions leaves them
   triaging windows after every night of work. `hk report --parent <sid>` has no "no parent" mode and
@@ -331,6 +339,13 @@ existing one. Four rules that cost the loop silently:
   of tools into `~/.hermes`. hk therefore refuses to boot the kernel without `HERMES_HOME`, and
   holds `HERMES_DISABLE_LAZY_INSTALLS=1` around the import only (restored afterwards, not
   inherited by jobs).
+- **The entry point must say its piece on a python too old to run the rest.** `hk` needs ≥ 3.11 (`tomllib`), while
+  hosts that carry Hermes are not always that new (Ubuntu 18.04 → 3.6, Debian 10 → 3.7). Keep `bin/hk` and its
+  resolver (`bin/_hk_interp.py`) parseable by 3.6 and let them *launch* what they find — order `HAWKEYE_PYTHON` →
+  `<HERMES_HOME>/tools/python-*/bin/python3` → `installs/*/environments/*/venv/bin/python3`, each candidate proven
+  by actually importing `tomllib` and `sqlite3`, because a half-built venv looks perfect to `os.path`. Never pin an
+  absolute interpreter in the unit: the install hash moves on every `hermes update` and `/usr/bin/python3` differs
+  per distribution. Guard the 3.6 promise with `ast.parse(src, feature_version=(3, 6))` over both files.
 - **The kernel ignores `HERMES_HOME` for the board root on purpose** (`kanban_home()` uses
   `HERMES_KANBAN_HOME` or the machine root, because boards are shared across profiles). Any
   test that points `HERMES_HOME` at a fixture and then resolves a board must set
@@ -379,6 +394,17 @@ existing one. Four rules that cost the loop silently:
   sleep 0.5; done`) and report the measured lifetime, then repeat the suite 2–3 times: transient in
   every run means self-exiting, growing across runs means a real leak. A leftover with a *different*
   run id each time (not the one the test names) is a second fixture leaking, not the one you fixed.
+- **A verdict file with two readers will disagree with itself.** `incident.json` answering "is this run in trouble"
+  was read raw by `hk status` and through `store.incident_active()` by `doctor`, so after doctor withdrew an
+  incident the status line still showed it open. Route every reader of "is this open" through one predicate, keep the
+  raw document for the audit trail, and express the answer as an explicit boolean (`incident_open` in `--json`, a
+  `(withdrawn)` marker in the note) instead of inferring it from the object being non-empty. Where the file's
+  *presence* also serves as an evidence rule somewhere else (the sweep and `hk gc` keep any run carrying an
+  incident), write down in the code which reading is deliberate — otherwise the next reader "fixes" the other half.
+- **Reproduce the reporter's order in the fixture, not just its end state.** A withdrawn incident only exists after
+  `doctor --fix` has run, so hand-writing the file and asserting on `status` tests the *open* case and looks like the
+  fix failing. Drive the same writer the reporter did, and choose the run shape on purpose: a running run reaches
+  `gc` as `not finished`, a finished one as `has incident` — wrong shape, wrong assertion.
 - Wake turns advance on their own (measured on the WebUI: no page refresh needed).
 - Use `OnCalendar=*:0/2` rather than `OnBootSec` + `OnUnitActiveSec`: after a manual
   `systemctl --user start` of the service, the latter stops scheduling the next

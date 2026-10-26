@@ -324,6 +324,37 @@ Three modes, and they compose rather than replace each other:
 | wake + child session (`--report-into`) | a turn **and** a browsable child session | default: the work should outlive the message |
 | cron delivery | a session of its own | nobody is in the chat at all |
 
+### 7d. The ledger: many cycles, one child session
+
+A producer that wakes on a schedule has a third problem beyond "where does it report": a child
+session *per cycle* rebuilds the sidebar clutter one level down. `--into` appends to a child that
+already exists:
+
+```bash
+hk report --into <child-session-id> --file <entry.md> --title "cycle 12: new activity"
+```
+
+Each entry is stamped (`[YYYY-MM-DD HH:MM:SS] <title>`) so the fifth update is still identifiable
+inside the same transcript. Two refusals keep it honest: the target must exist, and it must be a
+**child** -- appending to a top-level session would edit a conversation the user owns rather than
+write to an output sink. `--parent` creates a new child; `--into` appends; giving neither is an
+error, not a default.
+
+The pattern for "poll every N minutes, act only when something changed":
+
+```
+poll loop (0 tokens while quiet, heartbeats so stall detection sees it alive)
+   └─ nothing new → sleep, until TTL
+   └─ something new → append the finding with `hk report --into <ledger>`
+                    → mark the item seen  (no state write = a wake storm next cycle)
+                    → exit  ← the exit is the only wake channel a session actually has
+                          └─ wake turn does the work, then re-arms the next window
+```
+
+Exit-on-detection is deliberate: a wake requires the job to *end*, so the window is one-shot and the
+wake turn re-arms it. A script that kept running after detecting something would report into the
+ledger and never tell anyone.
+
 ``--rotate-bytes`` archives an oversized signal file into ``<dir>/archive/`` at startup and starts
 a fresh one, so a long-lived inbox cannot grow without bound. Rotation happens *before* the
 digest baseline is taken -- rotating mid-watch would otherwise look like a change and the watcher

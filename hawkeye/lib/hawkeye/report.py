@@ -103,6 +103,32 @@ def write_child(parent: str, title: str, body: str, *, source: str = "hawkeye") 
     return sid
 
 
+def append_child(sid: str, title: str, body: str) -> int:
+    """Append one entry to an existing child session and return the message row id.
+
+    A ledger is a single child session that a recurring producer keeps writing into: one place for
+    the user to read, and no new window per cycle. Two refusals keep it honest -- the target must
+    exist, and it must be a *child*: appending to a top-level conversation would edit a
+    conversation the user owns.
+    """
+    if not (sid or "").strip():
+        raise ValueError("--into needs a session id")
+    db_cls = _session_db_class()
+    db = db_cls()
+    try:
+        row = db.get_session(sid.strip())
+        if row is None:
+            raise ValueError("session %s does not exist" % sid.strip())
+        parent = row["parent_session_id"] if not isinstance(row, dict) else row.get("parent_session_id")
+        if not parent:
+            raise ValueError("session %s is a top-level session; a ledger must be a child session"
+                             % sid.strip())
+        stamp = "[%s] %s\n\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), title or "entry")
+        return db.append_message(sid.strip(), "assistant", stamp + body)
+    finally:
+        db.close()
+
+
 def report_file(path: Path, parent: str, title: str, *, source: str = "hawkeye") -> str | None:
     """Report a file's contents as a child session. Returns the id, or None when unavailable.
 

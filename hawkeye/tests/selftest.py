@@ -889,6 +889,104 @@ def test_report_creates_a_child_session() -> None:
           bad.returncode != 0 and total == "2", "rc=%s sessions=%s" % (bad.returncode, total))
 
 
+def test_report_can_append_to_one_ledger_child() -> None:
+    """A recurring producer must be able to keep writing into the *same* child session.
+
+    Reporting is child-only, which fixed the sidebar clutter -- but a watcher that woke every five
+    minutes and reported each cycle as a new child would put that clutter back one level down. A
+    ledger is one child session that keeps accumulating entries, so the fifth update is still in the
+    place the user learned to look. Appending to a top-level conversation is refused: that is a
+    conversation the user owns, not an output sink.
+    """
+    src = os.environ.get("HAWKEYE_KERNEL_SRC", "").strip()
+    if not src:
+        print("  SKIP ledger: HAWKEYE_KERNEL_SRC is not set")
+        return
+    home = BASE / "ledger-home"
+    home.mkdir()
+    env = {**ENV, "HAWKEYE_KERNEL_SRC": src, "HERMES_HOME": str(home),
+           "HAWKEYE_V2_CONFIG": str(cfg("ledger")), "HERMES_DISABLE_LAZY_INSTALLS": "1"}
+
+    seed = (
+        "import sys\n"
+        "sys.path.insert(0, %r)\n"
+        "import hermes_bootstrap\n"
+        "from hermes_state import SessionDB\n"
+        "db = SessionDB()\n"
+        "db.create_session('parent-1', source='webui', display_name='parent')\n"
+        "db.create_session('ledger-1', source='hawkeye', parent_session_id='parent-1',"
+        " display_name='issue ledger')\n"
+        "db.append_message('ledger-1', 'assistant', 'ledger opened')\n"
+        "db.close()\n"
+        "print('SEEDED')\n" % src
+    )
+    try:
+        seeded = subprocess.run([sys.executable, "-c", seed], capture_output=True, text=True,
+                                env=env, timeout=180)
+    except subprocess.TimeoutExpired:
+        shutil.rmtree(home, ignore_errors=True)
+        print("  SKIP ledger: seeding a session db timed out")
+        return
+    if "SEEDED" not in seeded.stdout:
+        shutil.rmtree(home, ignore_errors=True)
+        tail = (seeded.stderr or "").strip().splitlines()[-1:] or ["no output"]
+        print("  SKIP ledger: cannot seed a session db (%s)" % tail[0])
+        return
+
+    def append(where: str, text: str, title: str) -> subprocess.CompletedProcess:
+        body = BASE / ("ledger-%s-%s.md" % (where, title))
+        body.write_text(text)
+        return subprocess.run([sys.executable, str(HK), "report", "--into", where,
+                               "--file", str(body), "--title", title],
+                              capture_output=True, text=True, env=env, timeout=180)
+
+    first = append("ledger-1", "first finding\n", "cycle-a")
+    second = append("ledger-1", "second finding\n", "cycle-b")
+    check("ledger: appending to a child succeeds", first.returncode == 0 and second.returncode == 0,
+          (first.stderr or second.stderr or "")[-200:])
+
+    # One JSON line, not line-separated prints: message content contains newlines, so splitlines()
+    # would hand back the first line of the third value and silently truncate the assertion input.
+    reader = (
+        "import json, sqlite3\n"
+        "c = sqlite3.connect(%r)\n"
+        "print(json.dumps({\n"
+        "  'kids': c.execute(\"select count(*) from sessions where parent_session_id='parent-1'\")"
+        ".fetchone()[0],\n"
+        "  'msgs': [r[0] for r in c.execute(\"select content from messages where "
+        "session_id='ledger-1' order by id\")],\n"
+        "}))\n" % str(home / "state.db")
+    )
+    info2 = json.loads(subprocess.run([sys.executable, "-c", reader], capture_output=True,
+                                      text=True, timeout=60).stdout or "{}")
+    kids = info2.get("kids")
+    entries = info2.get("msgs") or []
+    blob = "\n".join(entries)
+    check("ledger: two cycles did not create a second child", kids == 1, "children=%s" % kids)
+    check("ledger: both entries live in the same session", len(entries) == 3,
+          "messages=%s" % len(entries))
+    check("ledger: entries are kept in order and stamped",
+          "first finding" in blob and "second finding" in blob
+          and blob.index("first finding") < blob.index("second finding")
+          and "cycle-a" in blob and "cycle-b" in blob
+          # each entry carries its own UTC stamp, so two cycles are told apart by more than order
+          and len(re.findall(r"\[\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\]", blob)) == 2, blob[:200])
+
+    top = append("parent-1", "should not land here\n", "top-attempt")
+    after = subprocess.run([sys.executable, "-c",
+                            "import sqlite3;c=sqlite3.connect(%r);"
+                            "print(c.execute(\"select count(*) from messages where session_id='parent-1'\")"
+                            ".fetchone()[0])" % str(home / "state.db")],
+                           capture_output=True, text=True, timeout=60).stdout.strip()
+    check("ledger: appending to a top-level session is refused",
+          top.returncode != 0 and after == "0", "rc=%s msgs=%s" % (top.returncode, after))
+
+    gone = append("no-such-session", "nowhere\n", "missing-attempt")
+    check("ledger: appending to a missing session is refused", gone.returncode != 0,
+          "rc=%s" % gone.returncode)
+    shutil.rmtree(home, ignore_errors=True)
+
+
 def test_state_writes_cannot_resurrect_a_finished_run() -> None:
     """Progress writes and the stop verdict must not interleave into a resurrected run.
 
@@ -1726,6 +1824,7 @@ def main() -> int:
                  test_per_run_report_interval_overrides_the_host_setting,
                  test_state_writes_cannot_resurrect_a_finished_run,
                  test_report_creates_a_child_session,
+                 test_report_can_append_to_one_ledger_child,
                  test_kernel_branch_resolves_board_paths,
                  test_crash_loop_is_bounded, test_gc_keeps_incidents, test_status_all):
         print("\n# %s" % test.__name__)
