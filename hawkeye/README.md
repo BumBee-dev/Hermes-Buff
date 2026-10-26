@@ -305,6 +305,42 @@ a fresh one, so a long-lived inbox cannot grow without bound. Rotation happens *
 digest baseline is taken -- rotating mid-watch would otherwise look like a change and the watcher
 would wake itself.
 
+## 7d. Decision inbox: things that wait for a person
+
+A session todo list is **deliberately session-scoped**: a list shared across every open project is
+how an nginx decision gets confused with an Android one, so it stays with the conversation that
+made it. That is the right default and the wrong place for "this needs the human when they come
+back" — the item has to outlive the session that produced it.
+
+So the durable half is a file, and the todo list is only the view:
+
+```
+cache/hawkeye/inbox/decisions.jsonl        # source of truth: id, title, why, options, default, status
+
+config/scripts/decisions.py add --title "Enable monitoring?" \
+    --why "wakes need the window alive" --options "yes|no" --default "no" \
+    --session <session-id that should see it>
+config/scripts/decisions.py list [--open-only] [--json]
+config/scripts/decisions.py todo [--prefix "NEEDS DECISION: "]   # render into a session todo
+config/scripts/decisions.py answer d1 --answer yes --note "observe a day"
+```
+
+The loop, end to end:
+
+1. a producer (cron, a run, or the agent) hits something only a person may decide;
+2. it appends an entry with options **and a default**, and names the session that should see it;
+3. on the next wake, the agent mirrors the open entries into that session's todo list — that is the
+   list a person actually looks at when they are back;
+4. the person answers by id ("d1 yes, d2 keep"); the agent answers the entry, executes, and clears
+   the todo item.
+
+Two rules keep it honest:
+
+* **nothing executes from a default on its own.** If an item were safe to decide automatically it
+  would not be in the inbox; the default exists to make answering cheap, not to skip the answer.
+* **the file is append-only for adds** (answers rewrite it atomically), so the history of what was
+  asked is never lost and cannot be confused with the todo list's lifetime.
+
 ## 8a. Two-process pattern: a producer that works, a watcher that wakes
 
 Some work must continue when nobody is in the chat — an issue triage loop, a nightly audit. A run

@@ -45,6 +45,19 @@ Python >= 3.11), this **skill** (the agent-side procedure), and an optional
   after the install that every reference the skill names exists, and keep a test for the class
   (grep the names out of `SKILL.md`, compare with the tree, and check the installer copies a
   directory rather than the entry file).
+- **The host's home directory is a published list; this tool adds nothing to its top.** Runtime
+  artefacts live under `<HERMES_HOME>/cache/<tool>/` (the shape Hermes uses for its own tool caches:
+  `cache/scratch`, `cache/<name>.json`), configuration under `$XDG_CONFIG_HOME/<tool>/`, and
+  `hk paths` prints all three so a user never has to read the source to learn what is safe to
+  delete. A migration must carry *finished* runs and **name** the live ones it leaves in the old
+  root (moving a directory out from under a phase is the orphan bug again); keep a test that a run
+  leaves nothing but `cache/` at the home root, and one that config resolution never *requires* a
+  directory inside `HERMES_HOME`.
+- **Move a path or rename a symbol, then grep for its old spelling.** The default run root moved and
+  `hk --help` plus two README lines still named the old one, so the flag help pointed a user at a
+  directory the tool no longer writes. Search help strings, the config example and README for the
+  old path/name in the same commit; keep exactly one deliberate mention where the legacy location
+  is the subject (the helper that *names* runs left behind in the old root has to describe it).
 
 ## When to use
 
@@ -137,6 +150,13 @@ one model, treat the first two as mandatory.
   about — that is the failure mode, not the leak itself. Prefer: systemd unit (visible via
   `systemctl`, dies with the host) for mechanical work, and a bounded `hk run` watcher whose exit
   wakes this session for notification.
+- **A report is a child of the session that asked for the work — never a new window.** The user's
+  only view is the sidebar, so an unattended loop that mints its own top-level sessions leaves them
+  triaging windows after every night of work. `hk report --parent <sid>` has no "no parent" mode and
+  refuses a parent id that does not exist; `watch-file --report-into <sid>` carries the parent
+  through the watcher. Detached conversations are a decision the person makes in the UI, not
+  something a background job decides for them. Mechanics and the verification query are in
+  `references/in-session-watch.md`.
 - **cron cannot address an existing session.** Its delivery targets platforms (webui is not one)
   and every fire creates its own session. The only mechanism that lands in a specific session is a
   Hermes-managed background process exiting (phase exit → notify). Choose cron only when nobody
@@ -150,6 +170,10 @@ one model, treat the first two as mandatory.
   checkout; two writers plus a `git checkout` means the other side re-writes your revert and you
   re-write its fix. Pause the schedule first, then look at `git status`/`git log` and decide whose
   implementation wins — verifying the winner beats racing it. Resume only after the tree is clean.
+  **Pausing the schedule does not stop an in-flight run**: a turn that started before the pause keeps
+  writing files for minutes afterwards (it re-wrote a revert three minutes later). Check the loop's
+  session `last_activity_at` in `state.db` and the mtimes of the files you are about to touch, and
+  wait for idle before editing or reverting.
 - **Run `hk gate-check` before the first dispatch.** The gate plugin is loaded per profile,
   so an install that only touched `default` blocks the orchestrator's own completions and
   lets every worker through. Exit code 1 names the ungated profiles; `install.sh --gate
@@ -217,6 +241,10 @@ Install the fallback timer (every 2 minutes, independent of the agent):
 `doctor` is an ordinary Python script: one idle sweep is about 55 ms, 19 MB RSS,
 no directory creation, no network, no model call — **0 tokens**. Tokens only come
 from "phase exits -> notify -> wake turn". No run means no phase, so no wake.
+A monitor-gated cron tick has the same shape: the gate runs before the agent turn, so an
+unchanged tick costs 0 API calls and opens no session; only a changed tick spends a turn.
+When asked "is monitoring expensive", answer by layer and measure it from `state.db` — the
+per-layer table and the query are in `references/in-session-watch.md`.
 journald records one line per sweep; silence it with `StandardOutput=null` if the
 noise bothers you.
 
@@ -339,21 +367,14 @@ python3 tests/selftest.py         # real subprocesses; the printed `result:` lin
 python3 tests/gate_selftest.py    # synthetic board DBs, 29 checks
 ```
 
-Both build their own minimal board DB through `tests/fixtures.py`; neither reads an
-absolute path, so a clone runs on any host. To exercise the kernel path branch,
-pass both env vars explicitly: `HAWKEYE_KERNEL_SRC=<Hermes source>` and
-`HAWKEYE_TEST_UV_DEPS=<HERMES_HOME>/cache/uv/archive-v0` (Hermes runs from a uv
-temporary environment, so without these `hermes_cli` fails to import, the code
-silently takes the fallback, and the kernel branch stays untested). Without them
-the related assertions are skipped rather than failed.
-
-After a major Hermes upgrade, run both suites first (about 20 s, read-only):
-a failure means the kernel semantics this depends on have changed.
-
-Reproducible evidence of v1's silent failures lives in `tests/legacy/`: two scripts
-using an A/B layout (`<home>/kanban.db` versus `boards/default/`) showing that the
-old version neither wrote events nor enforced criterion (c) on the default board.
-They only run when `HAWKEYE_LEGACY_PLUGIN` points at the old plugin directory.
+Both build their own minimal board DB through `tests/fixtures.py`; neither reads an absolute path,
+so a clone runs on any host. The kernel-path branch needs `HAWKEYE_KERNEL_SRC` **and**
+`HAWKEYE_TEST_UV_DEPS` — without both the related assertions are skipped rather than failed, so a
+clean run does not prove the kernel branch was exercised. After a major Hermes upgrade run both
+suites first (about 20 s, read-only): a failure means the kernel semantics changed. `tests/legacy/`
+holds v1's silent-failure scripts (`HAWKEYE_LEGACY_PLUGIN`). The exact env values, what each suite
+can and cannot prove, and why a suite that cannot go red is the real hazard are in
+`references/testing-and-release.md`.
 
 Release mechanics — proving a new test red against the old code before trusting it green,
 sandbox-testing `install.sh` with a stub CLI, verifying a push through the API instead of

@@ -1285,6 +1285,54 @@ def test_a_spelled_out_default_path_is_not_a_redirect() -> None:
           out.strip()[-400:])
 
 
+def test_decision_inbox_round_trip() -> None:
+    """Items that need a human call must outlive the session that produced them.
+
+    A session todo list is deliberately session-scoped (a list shared across projects is how an
+    nginx decision gets confused with an Android one), so anything that has to wait for a person
+    to come back lives in a file, and the todo list is only the view. This exercises the file half:
+    add, render for the UI, answer, and the open-only view the wake path uses.
+    """
+    script = Path(__file__).resolve().parents[1] / "config" / "scripts" / "decisions.py"
+    store = BASE / "decisions.jsonl"
+
+    def run(*argv) -> str:
+        return subprocess.run([sys.executable, str(script), *argv],
+                              capture_output=True, text=True, timeout=60).stdout
+
+    run("--file", str(store), "add", "--title", "enable monitoring?", "--why", "nobody is woken",
+        "--options", "yes|no", "--default", "no")
+    run("--file", str(store), "add", "--title", "rotate at?", "--options", "200KB|1MB",
+        "--default", "200KB")
+    listing = run("--file", str(store), "list")
+    check("decisions: both ids are visible", "d1" in listing and "d2" in listing, listing)
+    check("decisions: options and defaults render", "yes | no" in listing and "default=no" in listing,
+          listing)
+
+    todo = json.loads(run("--file", str(store), "todo") or "[]")
+    check("decisions: todo rendering carries the id, options and default",
+          len(todo) == 2 and todo[0]["id"] == "d1" and "options:" in todo[0]["content"]
+          and "default:" in todo[0]["content"], str(todo)[:200])
+
+    run("--file", str(store), "answer", "d1", "--answer", "yes", "--note", "observe a day")
+    open_only = run("--file", str(store), "list", "--open-only")
+    check("decisions: an answered item leaves the open view", "d1" not in open_only and "d2" in open_only,
+          open_only)
+
+    run("--file", str(store), "add", "--title", "third")
+    ids = json.loads(run("--file", str(store), "list", "--json") or "[]")
+    check("decisions: ids never reuse an answered one",
+          sorted(r["id"] for r in ids) == ["d1", "d2", "d3"], str([r["id"] for r in ids]))
+
+    # Regression: a flag given before the subcommand used to be overwritten by the subparser's
+    # default, so the two spellings silently addressed different files.
+    other = BASE / "decisions-other.jsonl"
+    run("--file", str(other), "add", "--title", "via global position")
+    check("decisions: --file works before and after the subcommand",
+          "via global position" in run("list", "--file", str(other))
+          and "via global position" not in run("--file", str(store), "list"), "path drift")
+
+
 def test_installer_installs_every_reference() -> None:
     """A self-consistent tree is not an installed artifact that is complete (#6).
 
@@ -1342,6 +1390,7 @@ def main() -> int:
                  test_gc_waits_for_a_report_to_be_delivered,
                  test_the_sweep_shares_the_gc_predicate,
                  test_a_spelled_out_default_path_is_not_a_redirect,
+                 test_decision_inbox_round_trip,
                  test_installer_installs_every_reference,
                  test_kanban_watcher_reads_default_board,
                  test_named_board_is_not_the_default_board,
