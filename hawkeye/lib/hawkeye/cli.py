@@ -404,7 +404,8 @@ def _targets(args: argparse.Namespace) -> list[str]:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="hk", description="hawkeye-v2: long-run supervision and reports back to the source session")
     p.add_argument("--config", help="TOML config (defaults to $HAWKEYE_V2_CONFIG)")
-    p.add_argument("--root", help="run directory root (defaults to $HAWKEYE_V2_ROOT or <HERMES_HOME>/hawkeye-v2/runs)")
+    p.add_argument("--root", help="run directory root (defaults to $HAWKEYE_V2_ROOT or "
+                                     "<HERMES_HOME>/cache/hawkeye/runs)")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     run = sub.add_parser("run", help="start an exec run (best launched from a terminal background)")

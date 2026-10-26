@@ -134,7 +134,7 @@ After being woken: `kanban_show` to read the output → judge against the card's
 | `hk gate-check [--json]` | Per-profile completion-gate coverage; exit code 1 when any profile is ungated |
 | `hk phase --run X` | (internal) Run one supervisor phase; doctor uses it to restart |
 
-`--config FILE` / `$HAWKEYE_V2_CONFIG` select the config; `--root DIR` / `$HAWKEYE_V2_ROOT` select the run root (default `<HERMES_HOME>/hawkeye-v2/runs`).
+`--config FILE` / `$HAWKEYE_V2_CONFIG` select the config; `--root DIR` / `$HAWKEYE_V2_ROOT` select the run root (default `<HERMES_HOME>/cache/hawkeye/runs`).
 
 **Interpreter and module resolution** (this is where "missing module" surprises come from):
 
@@ -464,7 +464,7 @@ contract, which is how it stayed hidden until an outside report caught it (#3).
 | Dependency | Required? | Notes / consequence if missing |
 |---|---|---|
 | Python ≥ 3.11 | Required | Uses `tomllib`; pure standard library, **no pip packages needed** |
-| Writable directory | Required | Default `<HERMES_HOME>/hawkeye-v2/runs`, changeable via `HAWKEYE_V2_ROOT` |
+| Writable directory | Required | Default `<HERMES_HOME>/cache/hawkeye/runs`, changeable via `HAWKEYE_V2_ROOT` |
 | Hermes `terminal(background, notify, persist_on_release)` | Required for the scenarios | The wake channel. Built into Hermes, nothing extra to install |
 | `hermes_cli.kanban_db` (kernel source path) | Required for the board scenario | Taken from `HAWKEYE_KERNEL_SRC` (set it to `<HERMES_SRC>`), imported the way Hermes imports it (via `hermes_bootstrap`, so the environment's dependencies are on `sys.path`); if it still cannot be imported, fallback path resolution is used |
 | Hermes kanban (including the in-gateway dispatcher) | Required for the board scenario | `kanban.dispatch_in_gateway` defaults to true |

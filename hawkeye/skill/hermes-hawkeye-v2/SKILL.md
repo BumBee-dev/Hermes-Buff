@@ -141,6 +141,15 @@ one model, treat the first two as mandatory.
   and every fire creates its own session. The only mechanism that lands in a specific session is a
   Hermes-managed background process exiting (phase exit → notify). Choose cron only when nobody
   needs to see it in this chat.
+- **A delegated fix is a claim until you re-derive it.** When an autonomous loop (cron, a worker, a
+  subagent) reports "fixed in <commit>", treat that as a pointer, not a fact: read the commit, run
+  both suites yourself, and reproduce the behaviour on a live probe. Twice in one maintenance pass
+  the report was accurate but the *test* was not (a suite that could not go red), and only an
+  independent run showed it.
+- **Do not edit the tree a running loop is editing.** A scheduled job and this session share one
+  checkout; two writers plus a `git checkout` means the other side re-writes your revert and you
+  re-write its fix. Pause the schedule first, then look at `git status`/`git log` and decide whose
+  implementation wins — verifying the winner beats racing it. Resume only after the tree is clean.
 - **Run `hk gate-check` before the first dispatch.** The gate plugin is loaded per profile,
   so an install that only touched `default` blocks the orchestrator's own completions and
   lets every worker through. Exit code 1 names the ungated profiles; `install.sh --gate
@@ -222,7 +231,7 @@ Inbound reports on the public repo are watched by a **bounded in-session watcher
 prints one milestone line on news **or** on TTL expiry. The wake then lands in the chat that
 armed it, and the window always closes with a question instead of going quiet. cron is only for
 "nobody is here to see it": every fire opens a NEW session window and cannot deliver into an
-existing one. Three rules that cost the loop silently:
+existing one. Four rules that cost the loop silently:
 
 - **A quiet-by-design job has to prove it is alive.** With the default `stall_seconds` (900 s) the
   phase kills any job whose `work.log` stops growing, and a watcher that only speaks on news is
@@ -233,6 +242,11 @@ existing one. Three rules that cost the loop silently:
   milestone prefix, so the file keeps moving without adding entries to the report, or set
   `stall_seconds = 0`, which now genuinely disables the check instead of meaning "kill on the
   first tick".
+
+- **A notifier must not inherit a job's report cadence.** `report_interval_seconds` exits the phase
+  to report — right for a build, wrong for a watcher (a wake every 30 min saying "still running", and
+  each exit orphans the job). Use `hk run --report-interval 0` so it exits only on news or its TTL;
+  the mechanism and the event-log signature are in `references/in-session-watch.md`.
 
 - **Advance the seen-state strictly after the reply lands** (`--mark-seen` last), and filter
   comments authored by the token's own account (`--ignore-authors`). The watcher posts as the
@@ -298,6 +312,10 @@ existing one. Three rules that cost the loop silently:
 - But **replacing the files of an already-enabled plugin does not reload it** — the
   gateway keeps running the old module. `disable` then `enable` to hot-load again;
   the copy inside the WebUI process needs a WebUI restart.
+- **A test can pass because the code it drives never ran**, and a redirected install can rewrite the
+  host's units. Both live in `references/testing-and-release.md` (child-process liveness assertion,
+  revert-callers grep, and which flags actually redirect a unit dir); read it before touching the
+  race tests or `install.sh`.
 - **"No leftover process" needs a sampling loop, not one `pgrep` snapshot.** A green suite can leave a
   phase alive for a sub-second window right after the run directory disappears, so a snapshot taken
   immediately after exit reports a leak and a snapshot a second later reports it fixed — same code,
@@ -342,5 +360,5 @@ sandbox-testing `install.sh` with a stub CLI, verifying a push through the API i
 `raw.githubusercontent`, and the per-claim shape of answering an inbound report — are in
 `references/testing-and-release.md`. The borrowed-kernel surface table (and what an upgrade
 can break) is in `references/kernel-surfaces.md`. Reporting into the conversation that started
-the work — TTL shape, wake latency, proving no new session window appeared, and the stop/pgrep
-pitfalls — is in `references/in-session-watch.md`.
+the work — TTL shape, wake latency, the report-cadence trap, child-session reports, proving no new
+session window appeared, and the stop/pgrep pitfalls — is in `references/in-session-watch.md`.
